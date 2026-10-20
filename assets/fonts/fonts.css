@@ -1,0 +1,42 @@
+/* Icon fonts: Material Symbols Outlined (subsets), © Google, Apache License 2.0
+   https://github.com/google/material-design-icons/blob/master/LICENSE
+   UI text uses the system font stack (see --font-ui in app.css). */
+
+/* Material Symbols Outlined — subset, FILL=0 (ligatures enabled) */
+@font-face {
+  font-family: "MS Outlined";
+  src: url("ms-outlined.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Material Symbols Outlined — subset, FILL=1 (ligatures enabled) */
+@font-face {
+  font-family: "MS Fill";
+  src: url("ms-fill.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+.ms,
+.msf {
+  font-family: "MS Outlined";
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: "liga";
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+.msf {
+  font-family: "MS Fill";
+}

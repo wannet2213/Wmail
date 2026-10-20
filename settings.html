@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pengaturan - Wmail</title>
+<link rel="icon" href="assets/images/wmail-logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/fonts/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body class="page">
+<header class="topbar">
+  <a class="iconbtn" href="/" aria-label="Kembali ke kotak masuk"><span class="ms">arrow_back</span></a>
+  <a class="brand" href="/" aria-label="Wmail">
+    <img src="assets/images/wmail-logo.svg" alt="" width="40" height="30">
+    <span class="brand-name">Pengaturan</span>
+  </a>
+  <div class="topbar-end"><button class="text-btn" id="logoutBtn">Keluar</button></div>
+</header>
+
+<main class="page-main">
+  <section>
+    <h2>Akun saya</h2>
+    <p class="muted" id="whoami">Memuat…</p>
+    <form class="inline-form" id="pwForm">
+      <div class="settings-field"><label for="pwCurrent">Password saat ini</label>
+        <input class="settings-input" id="pwCurrent" type="password" autocomplete="current-password" required></div>
+      <div class="settings-field"><label for="pwNew">Password baru (min. 8)</label>
+        <input class="settings-input" id="pwNew" type="password" autocomplete="new-password" minlength="8" required></div>
+      <div class="settings-field"><label for="pwRepeat">Ulangi password baru</label>
+        <input class="settings-input" id="pwRepeat" type="password" autocomplete="new-password" minlength="8" required></div>
+      <button class="send-btn" type="submit">Ganti password</button>
+    </form>
+  </section>
+
+  <section id="secUsers" hidden>
+    <h2>Pengguna</h2>
+    <p class="muted">Admin bisa membuka semua mailbox. User biasa hanya mailbox yang diberikan di bagian Akses.</p>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Username</th><th>Peran</th><th></th></tr></thead>
+      <tbody id="usersBody"></tbody>
+    </table></div>
+    <form class="inline-form" id="userForm">
+      <div class="settings-field"><label for="newUsername">Username</label>
+        <input class="settings-input" id="newUsername" autocomplete="off" required></div>
+      <div class="settings-field"><label for="newPassword">Password (min. 8)</label>
+        <input class="settings-input" id="newPassword" type="password" autocomplete="new-password" minlength="8" required></div>
+      <label class="check"><input type="checkbox" id="newIsAdmin"> Admin</label>
+      <button class="send-btn" type="submit">Tambah</button>
+    </form>
+  </section>
+
+  <section id="secMailboxes" hidden>
+    <h2>Mailbox</h2>
+    <p class="muted">Hanya alamat yang terdaftar di sini yang menerima email; alamat lain ditolak.</p>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Alamat</th><th>Nama pengirim</th><th></th></tr></thead>
+      <tbody id="mbBody"></tbody>
+    </table></div>
+    <form class="inline-form" id="mbForm">
+      <div class="settings-field"><label for="newAddress">Alamat</label>
+        <input class="settings-input" id="newAddress" type="email" placeholder="nama@domain-anda.com" required></div>
+      <div class="settings-field"><label for="newDisplay">Nama pengirim</label>
+        <input class="settings-input" id="newDisplay" placeholder="Nama yang tampil di penerima"></div>
+      <button class="send-btn" type="submit">Tambah</button>
+    </form>
+  </section>
+
+  <section id="secAccess" hidden>
+    <h2>Akses</h2>
+    <p class="muted">Atur mailbox mana yang boleh dibuka tiap user: tidak ada, terima saja (baca), atau kirim &amp; terima.</p>
+    <div class="table-wrap"><table class="data-table" id="accessTable"></table></div>
+  </section>
+
+  <section id="secProvider" hidden>
+    <h2>Pengiriman</h2>
+    <p class="muted">Resend dipakai lebih dulu; SES dipakai bila Resend gagal atau batas kuota tercapai. Kolom secret yang disamarkan tidak berubah kalau tidak diedit.</p>
+    <form id="providerForm">
+      <div class="settings-field"><label for="active_provider">Provider</label>
+        <select class="settings-input" id="active_provider" name="active_provider">
+          <option value="auto">Otomatis (Resend, cadangan SES)</option>
+          <option value="resend">Resend saja</option>
+          <option value="ses">Amazon SES saja</option>
+        </select></div>
+      <div class="settings-card">
+        <h4>Resend</h4>
+        <div class="settings-field"><label for="resend_api_key">API key</label>
+          <input class="settings-input" id="resend_api_key" name="resend_api_key" autocomplete="off" placeholder="re_…"></div>
+        <div class="settings-grid">
+          <div class="settings-field"><label for="resend_daily_limit">Batas per hari (0 = tanpa batas)</label>
+            <input class="settings-input" id="resend_daily_limit" name="resend_daily_limit" inputmode="numeric" placeholder="95"></div>
+          <div class="settings-field"><label for="resend_monthly_limit">Batas per bulan (0 = tanpa batas)</label>
+            <input class="settings-input" id="resend_monthly_limit" name="resend_monthly_limit" inputmode="numeric" placeholder="2800"></div>
+        </div>
+      </div>
+      <div class="settings-card">
+        <h4>Amazon SES</h4>
+        <p class="settings-card-hint">Kredensial IAM dengan izin <code>ses:SendRawEmail</code>. Domain harus sudah diverifikasi di SES.</p>
+        <div class="settings-grid">
+          <div class="settings-field"><label for="aws_region">Region</label>
+            <input class="settings-input" id="aws_region" name="aws_region" placeholder="ap-southeast-1"></div>
+          <div class="settings-field"><label for="aws_access_key_id">Access Key ID</label>
+            <input class="settings-input" id="aws_access_key_id" name="aws_access_key_id" autocomplete="off"></div>
+          <div class="settings-field full-width"><label for="aws_secret_access_key">Secret Access Key</label>
+            <input class="settings-input" id="aws_secret_access_key" name="aws_secret_access_key" autocomplete="off"></div>
+        </div>
+      </div>
+      <div class="inline-form"><button class="send-btn" type="submit">Simpan</button></div>
+    </form>
+  </section>
+
+  <section id="secCloudflare" hidden>
+    <h2>Cloudflare</h2>
+    <p class="muted">Diatur dari server dengan <code>wmail cloudflare setup</code>.</p>
+    <dl class="kv" id="cfInfo"></dl>
+  </section>
+</main>
+
+<div class="snackbar" id="snackbar" role="status" hidden><span id="snackText"></span></div>
+<script type="module" src="assets/settings.js"></script>
+</body>
+</html>

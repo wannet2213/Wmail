@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wmail</title>
+<link rel="icon" href="assets/images/wmail-logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/fonts/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button class="iconbtn" id="menuBtn" aria-label="Tampilkan/sembunyikan menu" aria-controls="panel"><span class="ms">menu</span></button>
+  <a class="brand" href="/" aria-label="Wmail">
+    <img src="assets/images/wmail-logo.svg" alt="" width="40" height="30">
+    <span class="brand-name">Wmail</span>
+  </a>
+  <div class="search" role="search">
+    <span class="iconbtn" aria-hidden="true"><span class="ms">search</span></span>
+    <input id="searchInput" type="search" placeholder="Cari email" aria-label="Cari email">
+  </div>
+  <div class="topbar-end">
+    <a class="iconbtn" href="/settings.html" aria-label="Pengaturan"><span class="ms">settings</span></a>
+    <button class="avatar" id="accountBtn" popovertarget="accountMenu" aria-label="Akun">?</button>
+  </div>
+</header>
+
+<div id="accountMenu" class="account-menu" popover>
+  <div class="account-name" id="accountName"></div>
+  <a class="account-item" href="/settings.html">Pengaturan</a>
+  <button class="account-item" id="logoutBtn">Keluar</button>
+</div>
+
+<div class="shell">
+  <section class="panel" id="panel" aria-label="Mailbox">
+    <button class="compose-btn" id="composeBtn">
+      <span class="ms">edit</span><span>Tulis</span>
+    </button>
+    <label class="mbx-select" id="mailboxPicker" hidden>
+      <span class="msf">inbox</span>
+      <select id="mailboxSelect" aria-label="Pilih mailbox"></select>
+    </label>
+    <nav class="navlist" id="navlist"></nav>
+  </section>
+
+  <main class="workarea">
+    <div class="list-tools">
+      <div class="tools-left">
+        <button class="iconbtn sel-all" aria-label="Pilih semua">
+          <span class="ms" id="selAllIcon">check_box_outline_blank</span>
+        </button>
+        <button class="iconbtn" id="btn-refresh" aria-label="Muat ulang"><span class="ms">refresh</span></button>
+      </div>
+      <div class="tools-right">
+        <span class="page-count" id="pageCount"></span>
+      </div>
+    </div>
+    <div class="mailrows" id="mailrows" role="list"></div>
+    <section class="reader" id="reader" hidden aria-label="Isi email">
+      <div class="reader-tools">
+        <div class="tools-left">
+          <button class="iconbtn" id="readerBack" aria-label="Kembali"><span class="ms">arrow_back</span></button>
+          <button class="iconbtn" id="btnRArchive" aria-label="Arsipkan"><span class="ms">archive</span></button>
+          <button class="iconbtn" id="btnRSpam" aria-label="Tandai spam"><span class="ms">report</span></button>
+          <button class="iconbtn" id="btnRDelete" aria-label="Hapus"><span class="ms">delete</span></button>
+          <button class="iconbtn" id="btnRUnread" aria-label="Tandai belum dibaca"><span class="ms">mark_email_unread</span></button>
+          <button class="iconbtn" id="btnRSnooze" aria-label="Tunda"><span class="ms">schedule</span></button>
+        </div>
+        <div class="tools-right">
+          <span class="page-count" id="readerPos"></span>
+        </div>
+      </div>
+      <article class="reader-body" id="readerBody"></article>
+    </section>
+  </main>
+</div>
+
+<section class="compose" id="compose" hidden role="dialog" aria-label="Pesan baru">
+  <header class="compose-head">
+    <span class="compose-title">Pesan baru</span>
+    <span class="compose-head-btns">
+      <button class="iconbtn" id="composeMin" aria-label="Kecilkan"><span class="ms">remove</span></button>
+      <button class="iconbtn" id="composeFull" aria-label="Layar penuh"><span class="ms">fullscreen</span></button>
+      <button class="iconbtn" id="composeClose" aria-label="Tutup"><span class="ms">close</span></button>
+    </span>
+  </header>
+  <div class="compose-to">
+    <span class="compose-label">Dari</span>
+    <select id="composeFrom" aria-label="Kirim dari"></select>
+  </div>
+  <div class="compose-to">
+    <input id="composeTo" type="text" placeholder="Kepada" aria-label="Penerima">
+    <button class="iconbtn" id="btnCcToggle" aria-label="Tampilkan Cc"><span class="ms">keyboard_arrow_down</span></button>
+  </div>
+  <div class="compose-cc" id="composeCcRow" hidden>
+    <input id="composeCc" type="text" placeholder="Cc" aria-label="Penerima Cc">
+  </div>
+  <input id="composeSubject" class="compose-subject" type="text" placeholder="Subjek" aria-label="Subjek">
+  <input type="hidden" id="composeInReplyTo" value="">
+  <textarea id="composeBody" class="compose-body" aria-label="Isi pesan"></textarea>
+  <div class="compose-attachments" id="composeAttachments" hidden></div>
+  <input type="file" id="composeFileInput" multiple hidden>
+  <footer class="compose-foot">
+    <button class="send-btn" id="sendBtn"><span class="msf">send</span><span>Kirim</span></button>
+    <button class="iconbtn" id="btnAttach" aria-label="Lampirkan file"><span class="ms">attach_file</span></button>
+  </footer>
+</section>
+
+<div class="snackbar" id="snackbar" role="status" hidden>
+  <span id="snackText"></span>
+</div>
+
+<script type="module" src="assets/app.js"></script>
+</body>
+</html>

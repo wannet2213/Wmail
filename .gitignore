@@ -1,0 +1,7 @@
+# Secrets and local data
+.env
+data/
+
+# Build outputs
+/wmail
+/email-pribadi
