@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,7 +39,11 @@ func InitDB(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to create db dir: %w", err)
 	}
 
-	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	// _time_format/_timezone make every datetime round-trip as canonical UTC text
+	// ("2006-01-02 15:04:05.999999999-07:00"). Without them the driver writes
+	// t.String(), and times parsed from Date headers with a numeric zone (e.g.
+	// "+0700 +0700") come back unparseable — one such row kills every listing.
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_time_format=sqlite&_timezone=UTC")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
 	}
@@ -58,8 +63,13 @@ func (d *DB) Close() error {
 }
 
 // migrations run in order; PRAGMA user_version records how many have been applied.
-var migrations = []string{
-	`
+type migration struct {
+	sql string                 // executed verbatim when set
+	run func(tx *sql.Tx) error // Go step, runs in the same transaction as sql
+}
+
+var migrations = []migration{
+	{sql: `
 	CREATE TABLE IF NOT EXISTS emails (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		message_id TEXT,
@@ -103,8 +113,8 @@ var migrations = []string{
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`,
-	`
+	);`},
+	{sql: `
 	CREATE TABLE users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -131,7 +141,8 @@ var migrations = []string{
 	ALTER TABLE emails ADD COLUMN mailbox_id INTEGER REFERENCES mailboxes(id) ON DELETE CASCADE;
 	ALTER TABLE emails ADD COLUMN provider TEXT NOT NULL DEFAULT '';
 	CREATE INDEX idx_emails_mailbox ON emails(mailbox_id);
-	CREATE UNIQUE INDEX idx_emails_mailbox_msgid ON emails(mailbox_id, message_id) WHERE message_id != '';`,
+	CREATE UNIQUE INDEX idx_emails_mailbox_msgid ON emails(mailbox_id, message_id) WHERE message_id != '';`},
+	{run: normalizeTimestamps},
 }
 
 func (d *DB) migrate() error {
@@ -144,15 +155,95 @@ func (d *DB) migrate() error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(migrations[i]); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %d: %w", i+1, err)
+		m := migrations[i]
+		if m.sql != "" {
+			if _, err := tx.Exec(m.sql); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("migration %d: %w", i+1, err)
+			}
+		}
+		if m.run != nil {
+			if err := m.run(tx); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("migration %d: %w", i+1, err)
+			}
 		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
 			tx.Rollback()
 			return err
 		}
 		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// storedTimeLayouts covers every datetime representation found in databases
+// written by older builds (the driver stored t.String() verbatim) plus the
+// canonical format written since _time_format=sqlite.
+var storedTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07:00", // canonical (current)
+	"2006-01-02T15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999 -0700 MST", // t.String() of named-zone times
+	"2006-01-02 15:04:05 -0700 -0700",         // t.String() of numeric-zone times (Date headers)
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999", // SQLite CURRENT_TIMESTAMP (UTC)
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// parseStoredTime accepts any layout above; zoneless input means UTC. The
+// monotonic suffix of t.String() ("m=+...") is stripped first.
+func parseStoredTime(s string) (time.Time, bool) {
+	if i := strings.Index(s, " m="); i > 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	for _, layout := range storedTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// normalizeTimestamps rewrites emails timestamps to canonical UTC. Old rows
+// mixed zones and formats; the numeric-zone variant ("... +0700 +0700", from
+// inbound Date headers) cannot be scanned back into time.Time at all, which
+// made every folder listing fail. Binding time.Time lets the driver write the
+// canonical format. Rows in an unrecognized format are left untouched.
+func normalizeTimestamps(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, created_at, updated_at FROM emails`)
+	if err != nil {
+		return err
+	}
+	type emailTimes struct {
+		id               int64
+		created, updated time.Time
+	}
+	var fixes []emailTimes
+	for rows.Next() {
+		var id int64
+		var created, updated sql.NullString
+		if err := rows.Scan(&id, &created, &updated); err != nil {
+			rows.Close()
+			return err
+		}
+		c, okC := parseStoredTime(created.String)
+		u, okU := parseStoredTime(updated.String)
+		if !okC || !okU {
+			log.Printf("[db] created_at/updated_at email %d tidak dikenali, dibiarkan: %q / %q", id, created.String, updated.String)
+			continue
+		}
+		fixes = append(fixes, emailTimes{id, c, u})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	for _, f := range fixes {
+		if _, err := tx.Exec(`UPDATE emails SET created_at = ?, updated_at = ? WHERE id = ?`, f.created, f.updated, f.id); err != nil {
 			return err
 		}
 	}

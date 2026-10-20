@@ -1,10 +1,14 @@
 package db_test
 
 import (
+	"database/sql"
 	"errors"
+	"net/mail"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"wmail/internal/db"
 	"wmail/internal/models"
@@ -69,5 +73,85 @@ func TestUsersSessionsMailboxes(t *testing.T) {
 	}
 	if _, err := d.GetEmail(e.ID); err == nil {
 		t.Fatal("emails not removed with mailbox")
+	}
+}
+
+// Old builds stored datetimes as t.String(): a Date header with a numeric zone
+// ("... +0700 +0700") became unscannable and broke every folder listing.
+// Migration 3 rewrites such rows to canonical UTC.
+func TestLegacyTimestampsRepaired(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	d, err := db.InitDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb, err := d.CreateMailbox("info@contoh.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := []models.Email{
+		{MailboxID: mb, MessageID: "<broken@x>", FromEmail: "a@b", Subject: "broken", Folder: "inbox"},
+		{MailboxID: mb, MessageID: "<mono@x>", FromEmail: "a@b", Subject: "mono", Folder: "inbox"},
+	}
+	for i := range legacy {
+		if err := d.SaveEmail(&legacy[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const brokenDate = "2026-10-20 18:42:19 +0700 +0700"                         // mail.ParseDate("...+0700").String()
+	const monoClock = "2026-10-20 19:42:02.147745055 +0800 CST m=+224.482093975" // time.Now().String()
+	if _, err := raw.Exec(`UPDATE emails SET created_at = ? WHERE message_id = '<broken@x>'`, brokenDate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE emails SET created_at = ?, updated_at = ? WHERE message_id = '<mono@x>'`, monoClock, monoClock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 2`); err != nil { // pretend an older build wrote this
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	d, err = db.InitDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	// New inbound mail carries a numeric-zone Date header; it must round-trip too.
+	dateHeader, err := mail.ParseDate("Mon, 20 Oct 2026 18:42:19 +0700")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound := models.Email{MailboxID: mb, MessageID: "<inbound@x>", FromEmail: "a@b", Subject: "inbound", Folder: "inbox", CreatedAt: dateHeader}
+	if err := d.SaveEmail(&inbound); err != nil {
+		t.Fatal(err)
+	}
+
+	emails, _, err := d.ListEmails(mb, "inbox", "", 50, 0)
+	if err != nil {
+		t.Fatalf("list emails: %v", err)
+	}
+	got := map[string]time.Time{}
+	for _, e := range emails {
+		got[e.Subject] = e.CreatedAt
+	}
+	if len(emails) != 3 {
+		t.Fatalf("got %d emails, want 3", len(emails))
+	}
+	wantBroken := time.Date(2026, 10, 20, 11, 42, 19, 0, time.UTC)
+	if !got["broken"].UTC().Equal(wantBroken) {
+		t.Fatalf("repaired created_at = %v, want %v", got["broken"], wantBroken)
+	}
+	if !got["mono"].UTC().Equal(time.Date(2026, 10, 20, 11, 42, 2, 147745055, time.UTC)) {
+		t.Fatalf("repaired monotonic created_at = %v", got["mono"])
+	}
+	if !got["inbound"].UTC().Equal(dateHeader.UTC()) {
+		t.Fatalf("inbound created_at = %v, want %v", got["inbound"], dateHeader.UTC())
 	}
 }
