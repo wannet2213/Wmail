@@ -52,6 +52,13 @@ $("#pwForm").addEventListener("submit", (e) => {
   }, "Password diganti. Sesi di perangkat lain sudah dikeluarkan.");
 });
 
+$("#sigForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  run(() => api("/api/me/signature", "PUT", { signature: $("#mySignature").value }), "Tanda tangan disimpan.");
+});
+
+window.wmailTheme.bind($("#themeSelect"));
+
 $("#logoutBtn").addEventListener("click", async () => {
   await fetch("/api/auth/logout", { method: "POST" });
   location.href = "/login.html";
@@ -175,7 +182,7 @@ $("#userForm").addEventListener("submit", (e) => {
 
 /* ---------- admin: mailboxes ---------- */
 
-// One folded line per mailbox; opening it edits the sender name and signature.
+// One folded line per mailbox; opening it edits the sender name.
 function renderMailboxes() {
   const el = $("#mbList");
   const open = new Set([...el.querySelectorAll("details[open]")].map((d) => d.dataset.mb));
@@ -185,8 +192,6 @@ function renderMailboxes() {
       <div class="user-body">
         <div class="settings-field"><label for="mbName${m.id}">Nama pengirim</label>
           <input class="settings-input" id="mbName${m.id}" value="${esc(m.displayName)}" placeholder="Nama yang tampil di penerima"></div>
-        <div class="settings-field"><label for="mbSig${m.id}">Tanda tangan</label>
-          <textarea class="settings-input sig-input" id="mbSig${m.id}" rows="3" placeholder="Disisipkan otomatis di bawah email yang ditulis dari alamat ini">${esc(m.signature)}</textarea></div>
         <div class="row-btns">
           <button class="text-btn" data-act="mb-save" data-id="${m.id}">Simpan</button>
           <button class="text-btn danger" data-act="mb-del" data-id="${m.id}">Hapus mailbox</button>
@@ -204,8 +209,8 @@ $("#mbList").addEventListener("click", (e) => {
   if (!b) return;
   const m = data.mailboxes.find((x) => x.id === Number(b.dataset.id));
   if (b.dataset.act === "mb-save") {
-    const body = { displayName: $(`#mbName${m.id}`).value, signature: $(`#mbSig${m.id}`).value };
-    run(async () => { await api(`/api/admin/mailboxes/${m.id}`, "PATCH", body); await loadAdmin(); }, "Mailbox disimpan.");
+    const body = { displayName: $(`#mbName${m.id}`).value };
+    run(async () => { await api(`/api/admin/mailboxes/${m.id}`, "PATCH", body); await loadAdmin(); }, "Nama pengirim disimpan.");
   } else if (b.dataset.act === "mb-del" && confirm(`Hapus ${m.address} beserta SEMUA emailnya? Tidak bisa dibatalkan.`)) {
     run(async () => { await api(`/api/admin/mailboxes/${m.id}`, "DELETE"); await loadAdmin(); }, "Mailbox dihapus.");
   }
@@ -262,6 +267,7 @@ async function loadAdmin() {
 async function boot() {
   me = await api("/api/me");
   $("#whoami").textContent = `Masuk sebagai ${me.user.username}${me.user.isAdmin ? " (admin)" : ""}.`;
+  $("#mySignature").value = me.user.signature || "";
   if (!me.user.isAdmin) return;
   for (const id of ["#secUsers", "#secMailboxes", "#secProvider", "#secCloudflare"]) $(id).hidden = false;
   await Promise.all([loadAdmin(), loadSettings()]);

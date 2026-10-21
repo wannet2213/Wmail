@@ -21,6 +21,7 @@ func SetupRouter(a *API, web fs.FS) http.Handler {
 
 	mux.Handle("GET /api/me", a.auth(a.Me))
 	mux.Handle("POST /api/me/password", a.auth(a.ChangePassword))
+	mux.Handle("PUT /api/me/signature", a.auth(a.SetSignature))
 	mux.Handle("GET /api/stats", a.auth(a.GetStats))
 	mux.Handle("GET /api/emails", a.auth(a.ListEmails))
 	mux.Handle("GET /api/emails/{id}", a.auth(a.GetEmail))

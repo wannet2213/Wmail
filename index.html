@@ -6,6 +6,7 @@
 <title>Wmail</title>
 <link rel="icon" href="assets/images/wmail-logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/fonts/fonts.css">
+<script src="assets/theme.js"></script>
 <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
@@ -28,6 +29,12 @@
 
 <div id="accountMenu" class="account-menu" popover>
   <div class="account-name" id="accountName"></div>
+  <label class="account-item theme-pick"><span class="ms">lightbulb</span>Tema
+    <select id="themeSelect" aria-label="Tema">
+      <option value="system">Ikuti sistem</option>
+      <option value="light">Terang</option>
+      <option value="dark">Gelap</option>
+    </select></label>
   <a class="account-item" href="/settings.html">Pengaturan</a>
   <button class="account-item" id="logoutBtn">Keluar</button>
 </div>

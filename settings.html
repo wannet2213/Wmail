@@ -6,6 +6,7 @@
 <title>Pengaturan - Wmail</title>
 <link rel="icon" href="assets/images/wmail-logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/fonts/fonts.css">
+<script src="assets/theme.js"></script>
 <link rel="stylesheet" href="assets/app.css">
 </head>
 <body class="page">
@@ -31,6 +32,19 @@
         <input class="settings-input" id="pwRepeat" type="password" autocomplete="new-password" minlength="8" required></div>
       <button class="send-btn" type="submit">Ganti password</button>
     </form>
+    <div class="inline-form">
+      <div class="settings-field theme-field"><label for="themeSelect">Tema</label>
+        <select class="settings-input" id="themeSelect">
+          <option value="system">Ikuti sistem</option>
+          <option value="light">Terang</option>
+          <option value="dark">Gelap</option>
+        </select></div>
+    </div>
+    <form class="inline-form" id="sigForm">
+      <div class="settings-field"><label for="mySignature">Tanda tangan</label>
+        <textarea class="settings-input sig-input" id="mySignature" rows="4" maxlength="4000" placeholder="Disisipkan di bawah email yang Anda tulis, dari alamat mana pun"></textarea></div>
+      <button class="send-btn" type="submit">Simpan tanda tangan</button>
+    </form>
   </section>
 
   <section id="secUsers" hidden>
@@ -51,7 +65,7 @@
 
   <section id="secMailboxes" hidden>
     <h2>Mailbox</h2>
-    <p class="muted">Hanya alamat yang terdaftar di sini yang menerima email; alamat lain ditolak. Buka alamat untuk mengubah nama pengirim dan tanda tangannya.</p>
+    <p class="muted">Hanya alamat yang terdaftar di sini yang menerima email; alamat lain ditolak. Buka alamat untuk mengubah nama pengirimnya.</p>
     <input class="settings-input list-filter" id="mbFilter" type="search" placeholder="Cari alamat" aria-label="Cari mailbox">
     <div class="scroll-list" id="mbList"></div>
     <form class="inline-form" id="mbForm">

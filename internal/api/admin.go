@@ -124,11 +124,11 @@ func (a *API) AdminUpdateMailbox(w http.ResponseWriter, r *http.Request, u *mode
 	if !valid {
 		return
 	}
-	var req struct{ DisplayName, Signature string }
+	var req struct{ DisplayName string }
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := a.db.UpdateMailbox(id, req.DisplayName, req.Signature); err != nil {
+	if err := a.db.UpdateMailboxName(id, req.DisplayName); err != nil {
 		writeDBError(w, err)
 		return
 	}

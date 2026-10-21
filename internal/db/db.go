@@ -146,6 +146,7 @@ var migrations = []migration{
 	{run: normalizeTimestamps},
 	{run: linkThreads},
 	{run: addColumns},
+	{run: userSignatures},
 }
 
 func (d *DB) migrate() error {
@@ -285,24 +286,38 @@ func linkThreads(tx *sql.Tx) error {
 	return err
 }
 
-// addColumns adds the mailbox signature and the Bcc list of sent mail. Existing columns
-// are skipped, so the step is safe to run again on a database a newer build touched.
+// hasColumn lets table-altering migrations skip work already done, so they stay safe
+// to run again on a database a newer build touched.
+func hasColumn(tx *sql.Tx, table, col string) (bool, error) {
+	var n int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, col).Scan(&n)
+	return n > 0, err
+}
+
+// addColumns keeps the Bcc list of sent mail. (It once also added a per-mailbox
+// signature; userSignatures removes that from databases that got it.)
 func addColumns(tx *sql.Tx) error {
-	for _, c := range []struct{ table, col, def string }{
-		{"mailboxes", "signature", "TEXT NOT NULL DEFAULT ''"},
-		{"emails", "bcc_recipients", "TEXT"},
-	} {
-		var n int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.col).Scan(&n); err != nil {
-			return err
-		}
-		if n == 0 {
-			if _, err := tx.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.col, c.def)); err != nil {
-				return err
-			}
-		}
+	has, err := hasColumn(tx, "emails", "bcc_recipients")
+	if err == nil && !has {
+		_, err = tx.Exec(`ALTER TABLE emails ADD COLUMN bcc_recipients TEXT`)
 	}
-	return nil
+	return err
+}
+
+// userSignatures gives each user their own signature in place of the per-mailbox one:
+// a shared mailbox like info@ is written from by several people, each signing their name.
+func userSignatures(tx *sql.Tx) error {
+	has, err := hasColumn(tx, "users", "signature")
+	if err == nil && !has {
+		_, err = tx.Exec(`ALTER TABLE users ADD COLUMN signature TEXT NOT NULL DEFAULT ''`)
+	}
+	if err != nil {
+		return err
+	}
+	if has, err = hasColumn(tx, "mailboxes", "signature"); err == nil && has {
+		_, err = tx.Exec(`ALTER TABLE mailboxes DROP COLUMN signature`)
+	}
+	return err
 }
 
 /* ---------- emails ---------- */
@@ -842,7 +857,7 @@ func (d *DB) GetUserByName(username string) (*models.User, error) {
 func (d *DB) userWhere(where string, arg any) (*models.User, error) {
 	var u models.User
 	var admin int
-	err := d.conn.QueryRow("SELECT id, username, is_admin, created_at FROM users WHERE "+where, arg).Scan(&u.ID, &u.Username, &admin, &u.CreatedAt)
+	err := d.conn.QueryRow("SELECT id, username, is_admin, signature, created_at FROM users WHERE "+where, arg).Scan(&u.ID, &u.Username, &admin, &u.Signature, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -930,6 +945,11 @@ func (d *DB) CreateSession(userID int64, ttl time.Duration) (string, error) {
 	return token, err
 }
 
+func (d *DB) SetSignature(userID int64, signature string) error {
+	_, err := d.conn.Exec("UPDATE users SET signature = ? WHERE id = ?", strings.TrimSpace(strings.ReplaceAll(signature, "\r\n", "\n")), userID)
+	return err
+}
+
 func (d *DB) UserBySession(token string) (*models.User, error) {
 	var id int64
 	err := d.conn.QueryRow("SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > ?", TokenHash(token), time.Now().Unix()).Scan(&id)
@@ -972,9 +992,8 @@ func (d *DB) CreateMailbox(address, displayName string) (int64, error) {
 	return res.LastInsertId()
 }
 
-func (d *DB) UpdateMailbox(id int64, displayName, signature string) error {
-	_, err := d.conn.Exec("UPDATE mailboxes SET display_name = ?, signature = ? WHERE id = ?",
-		strings.TrimSpace(displayName), strings.TrimSpace(strings.ReplaceAll(signature, "\r\n", "\n")), id)
+func (d *DB) UpdateMailboxName(id int64, displayName string) error {
+	_, err := d.conn.Exec("UPDATE mailboxes SET display_name = ? WHERE id = ?", strings.TrimSpace(displayName), id)
 	return err
 }
 
@@ -996,7 +1015,7 @@ func (d *DB) MailboxByAddress(address string) (*models.Mailbox, error) {
 }
 
 func (d *DB) ListMailboxes() ([]models.Mailbox, error) {
-	return d.queryMailboxes("SELECT id, address, display_name, signature, 1 FROM mailboxes ORDER BY address")
+	return d.queryMailboxes("SELECT id, address, display_name, 1 FROM mailboxes ORDER BY address")
 }
 
 // MailboxesForUser returns what u may open; admins get everything with send rights.
@@ -1004,7 +1023,7 @@ func (d *DB) MailboxesForUser(u *models.User) ([]models.Mailbox, error) {
 	if u.IsAdmin {
 		return d.ListMailboxes()
 	}
-	return d.queryMailboxes(`SELECT m.id, m.address, m.display_name, m.signature, g.can_send FROM mailboxes m
+	return d.queryMailboxes(`SELECT m.id, m.address, m.display_name, g.can_send FROM mailboxes m
 		JOIN user_mailboxes g ON g.mailbox_id = m.id WHERE g.user_id = ? ORDER BY m.address`, u.ID)
 }
 
@@ -1018,7 +1037,7 @@ func (d *DB) queryMailboxes(q string, args ...any) ([]models.Mailbox, error) {
 	for rows.Next() {
 		var m models.Mailbox
 		var canSend int
-		if err := rows.Scan(&m.ID, &m.Address, &m.DisplayName, &m.Signature, &canSend); err != nil {
+		if err := rows.Scan(&m.ID, &m.Address, &m.DisplayName, &canSend); err != nil {
 			return nil, err
 		}
 		m.CanSend = canSend == 1

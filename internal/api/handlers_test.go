@@ -455,3 +455,22 @@ func TestScheduledSend(t *testing.T) {
 		t.Fatalf("cancelled mail still scheduled: %+v", list)
 	}
 }
+
+func TestSignatureIsPerUser(t *testing.T) {
+	e := setup(t)
+	bob, root := e.login(t, "bob"), e.login(t, "root")
+	if rec := e.do(t, bob, "PUT", "/api/me/signature", map[string]string{"signature": "Salam,\r\nBob"}); rec.Code != 200 {
+		t.Fatalf("set signature: %d %s", rec.Code, rec.Body)
+	}
+	sig := func(c *http.Cookie) string {
+		var me struct{ User models.User }
+		json.NewDecoder(e.do(t, c, "GET", "/api/me", nil).Body).Decode(&me)
+		return me.User.Signature
+	}
+	if got := sig(bob); got != "Salam,\nBob" {
+		t.Fatalf("bob's signature = %q", got)
+	}
+	if got := sig(root); got != "" {
+		t.Fatalf("another user's signature leaked: %q", got)
+	}
+}

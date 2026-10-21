@@ -153,6 +153,24 @@ func (a *API) ChangePassword(w http.ResponseWriter, r *http.Request, u *models.U
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
+// SetSignature saves the signature added below what u writes, from any mailbox.
+func (a *API) SetSignature(w http.ResponseWriter, r *http.Request, u *models.User) {
+	var req struct{ Signature string }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	if len(req.Signature) > 4000 {
+		http.Error(w, "Tanda tangan terlalu panjang (maks. 4000 karakter).", http.StatusBadRequest)
+		return
+	}
+	if err := a.db.SetSignature(u.ID, req.Signature); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
 func writeDBError(w http.ResponseWriter, err error) {
 	if errors.Is(err, db.ErrInvalidInput) || errors.Is(err, db.ErrLastAdmin) {
 		http.Error(w, err.Error(), http.StatusBadRequest)

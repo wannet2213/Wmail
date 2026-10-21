@@ -332,7 +332,7 @@ function emailFrame(html, foldQuotes = false) {
   frame.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
   frame.setAttribute("title", "Isi email");
   frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank">
-    <style>body{margin:0;font:14px/1.6 Roboto,Arial,sans-serif;color:#1f1f1f;overflow-wrap:anywhere}img{max-width:100%;height:auto}
+    <style>html{background:#fff}body{margin:0;font:14px/1.6 Roboto,Arial,sans-serif;color:#1f1f1f;overflow-wrap:anywhere}img{max-width:100%;height:auto}
     .wm-fold :is(${QUOTES}){display:none}</style>
     </head><body class="${foldQuotes ? "wm-fold" : ""}">${html}</body></html>`;
   frame.addEventListener("load", () => {
@@ -738,6 +738,8 @@ $("#menuBtn").addEventListener("click", () => {
   document.body.classList.toggle(narrow ? "panel-open" : "panel-hidden");
 });
 
+window.wmailTheme.bind($("#themeSelect"));
+
 $("#logoutBtn").addEventListener("click", async () => {
   await fetch("/api/auth/logout", { method: "POST" });
   location.href = "/login.html";
@@ -891,27 +893,24 @@ for (const [pop, btn] of [["#sendMenu", "#sendMore"], ["#emojiPanel", "#btnEmoji
   });
 }
 
-// The sending mailbox's signature lives in its own block, so changing From swaps it.
+// The writer's signature lives in its own block, so the pen button can take it out again.
 function syncSignature() {
-  const mb = me.mailboxes.find((m) => m.id === Number($("#composeFrom").value));
+  const sig = me.user.signature;
   let block = editor.querySelector(".wm-signature");
-  if (!mb?.signature) return block?.remove();
+  if (!sig) return block?.remove();
   if (!editor.textContent.trim() && !block) editor.innerHTML = "<div><br></div>";
   if (!block) {
     block = document.createElement("div");
     block.className = "wm-signature";
     editor.append(document.createElement("br"), block);
   }
-  block.innerHTML = `-- <br>${esc(mb.signature).replace(/\n/g, "<br>")}`;
+  block.innerHTML = `-- <br>${esc(sig).replace(/\n/g, "<br>")}`;
 }
-$("#composeFrom").addEventListener("change", syncSignature);
 $("#btnSignature").addEventListener("mousedown", (e) => e.preventDefault());
 $("#btnSignature").addEventListener("click", () => {
   const block = editor.querySelector(".wm-signature");
   if (block) return block.remove();
-  if (!me.mailboxes.find((m) => m.id === Number($("#composeFrom").value))?.signature) {
-    return showSnackbar("Mailbox ini belum punya tanda tangan. Admin bisa mengaturnya di Pengaturan → Mailbox.");
-  }
+  if (!me.user.signature) return showSnackbar("Anda belum punya tanda tangan. Atur di Pengaturan → Akun saya.");
   syncSignature();
 });
 

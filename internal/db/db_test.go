@@ -257,3 +257,43 @@ func TestBareMailboxNameGetsDomain(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMailboxSignatureMovesToUsers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	d, err := db.InitDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	raw, _ := sql.Open("sqlite", path)
+	// What the build that kept signatures on mailboxes left behind.
+	for _, q := range []string{
+		`ALTER TABLE users DROP COLUMN signature`,
+		`ALTER TABLE mailboxes ADD COLUMN signature TEXT NOT NULL DEFAULT ''`,
+		`PRAGMA user_version = 5`,
+	} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+	raw.Close()
+
+	d, err = db.InitDB(path)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	defer d.Close()
+	id, _ := d.CreateUser("ana", "password-1", true)
+	if err := d.SetSignature(id, "Ana"); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := d.GetUser(id); u.Signature != "Ana" {
+		t.Fatalf("signature = %q", u.Signature)
+	}
+	if _, err := d.CreateMailbox("info@contoh.com", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ListMailboxes(); err != nil {
+		t.Fatalf("mailboxes after dropping their signature column: %v", err)
+	}
+}

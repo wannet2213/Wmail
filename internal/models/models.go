@@ -77,6 +77,7 @@ type User struct {
 	ID        int64     `json:"id"`
 	Username  string    `json:"username"`
 	IsAdmin   bool      `json:"isAdmin"`
+	Signature string    `json:"signature,omitempty"` // added below what the user writes
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -84,7 +85,6 @@ type Mailbox struct {
 	ID          int64  `json:"id"`
 	Address     string `json:"address"`
 	DisplayName string `json:"displayName"`
-	Signature   string `json:"signature"`
 	CanSend     bool   `json:"canSend"` // per-user view; admins always true
 }
 
