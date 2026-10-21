@@ -9,8 +9,11 @@ let me = { user: null, mailboxes: [] };
 let mailboxId = null;
 let mails = [];
 let totalMails = 0;
+let totalCapped = false; // more conversations than the server counts: "dari banyak"
+let page = 0; // list page, PAGE conversations each
+const PAGE = 50;
 let currentMailDetail = null;
-let stats = { inboxUnread: 0, starredCount: 0, sentCount: 0, draftsCount: 0, trashCount: 0 };
+let stats = { inboxUnread: 0, trashCount: 0 };
 
 let view = "inbox";
 let query = "";
@@ -131,12 +134,18 @@ async function apiGetEmails() {
     return;
   }
   try {
-    const url = `/api/emails?${mbq()}&folder=${encodeURIComponent(view)}&q=${encodeURIComponent(query)}`;
+    const url = `/api/emails?${mbq()}&folder=${encodeURIComponent(view)}&q=${encodeURIComponent(query)}&limit=${PAGE}&offset=${page * PAGE}`;
     const res = await api(url);
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     mails = data.emails || [];
     totalMails = data.total || 0;
+    totalCapped = !!data.capped;
+    // The last page can empty out after archiving or deleting its rows.
+    if (!mails.length && page > 0) {
+      page--;
+      return apiGetEmails();
+    }
     renderRows();
   } catch (err) {
     console.error("apiGetEmails error:", err);
@@ -206,7 +215,11 @@ function renderMailboxPicker() {
   composeBtn.title = composeBtn.disabled ? "Tidak ada mailbox yang diizinkan mengirim" : "";
 }
 
+$("#pagePrev").addEventListener("click", () => { page--; selected.clear(); apiGetEmails(); });
+$("#pageNext").addEventListener("click", () => { page++; selected.clear(); apiGetEmails(); });
+
 function switchMailbox(id) {
+  page = 0;
   mailboxId = id;
   try { localStorage.setItem("wmail.mailbox", String(id)); } catch {}
   view = "inbox";
@@ -251,6 +264,7 @@ function renderNav() {
   el.querySelectorAll("[data-view]").forEach((b) =>
     b.addEventListener("click", () => {
       view = b.dataset.view;
+      page = 0;
       openId = null;
       currentMailDetail = null;
       selected.clear();
@@ -316,7 +330,10 @@ function renderRows() {
 
   const mb = currentMailbox();
   document.title = `${stats.inboxUnread ? `(${stats.inboxUnread}) ` : ""}${mb ? mb.address : "Wmail"} - Wmail`;
-  $("#pageCount").textContent = totalMails > 0 ? `1–${mails.length} dari ${totalMails}` : "";
+  const first = page * PAGE + 1, last = page * PAGE + mails.length;
+  $("#pageCount").textContent = mails.length ? `${first}–${last} dari ${totalCapped ? "banyak" : totalMails}` : "";
+  $("#pagePrev").disabled = page === 0;
+  $("#pageNext").disabled = mails.length < PAGE || (!totalCapped && last >= totalMails);
   syncSelAll();
 }
 
@@ -717,6 +734,7 @@ for (const [id, act] of [["#btnRArchive", "archive"], ["#btnRInbox", "inbox"], [
 let searchTimer = null;
 $("#searchInput").addEventListener("input", (e) => {
   query = e.target.value.trim();
+  page = 0;
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     openId = null;

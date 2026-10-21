@@ -57,11 +57,8 @@ type SendRequest struct {
 }
 
 type Stats struct {
-	InboxUnread  int `json:"inboxUnread"`
-	StarredCount int `json:"starredCount"`
-	SentCount    int `json:"sentCount"`
-	DraftsCount  int `json:"draftsCount"`
-	TrashCount   int `json:"trashCount"`
+	InboxUnread int `json:"inboxUnread"` // unread conversations in Kotak masuk
+	TrashCount  int `json:"trashCount"`
 }
 
 type UpdateStatusRequest struct {

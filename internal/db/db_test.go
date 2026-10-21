@@ -297,3 +297,44 @@ func TestMailboxSignatureMovesToUsers(t *testing.T) {
 		t.Fatalf("mailboxes after dropping their signature column: %v", err)
 	}
 }
+
+func TestSearchUsesFullTextIndex(t *testing.T) {
+	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	mb, _ := d.CreateMailbox("info@contoh.com", "")
+	contract := models.Email{MailboxID: mb, MessageID: "<k@x>", FromEmail: "budi@luar.test", Subject: "Kontrak baru",
+		BodyText: "Mohon tanda tangan dokumennya", Folder: "inbox"}
+	meeting := models.Email{MailboxID: mb, MessageID: "<r@x>", FromEmail: "sari@luar.test", Subject: "Rapat",
+		BodyText: "Agenda kantor minggu depan", Folder: "inbox"}
+	for _, m := range []*models.Email{&contract, &meeting} {
+		if err := d.SaveEmail(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	search := func(q string) []int64 {
+		t.Helper()
+		list, _, err := d.ListEmails(mb, "all", q, 50, 0)
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		var ids []int64
+		for _, m := range list {
+			ids = append(ids, m.ID)
+		}
+		return ids
+	}
+	for q, want := range map[string]int64{"kontr": contract.ID, "tanda dokumen": contract.ID, "sari@luar.test": meeting.ID, `"agenda`: meeting.ID} {
+		if got := search(q); len(got) != 1 || got[0] != want {
+			t.Fatalf("search %q = %v, want [%d]", q, got, want)
+		}
+	}
+	deleted := true
+	_ = d.UpdateEmailStatus(contract.ID, models.UpdateStatusRequest{IsDeleted: &deleted})
+	_ = d.DeleteEmail(contract.ID)
+	if got := search("kontrak"); len(got) != 0 {
+		t.Fatalf("a deleted email is still found: %v", got)
+	}
+}

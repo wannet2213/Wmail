@@ -147,6 +147,43 @@ var migrations = []migration{
 	{run: linkThreads},
 	{run: addColumns},
 	{run: userSignatures},
+	{sql: `
+	-- Lists walk a mailbox newest-first and filter on these columns from the index alone.
+	-- Reading them from the table is slow: every row stores its bodies before them.
+	CREATE INDEX IF NOT EXISTS idx_emails_view ON emails(mailbox_id, created_at, folder, is_archived, is_deleted, is_starred, is_unread, thread_id);
+	DROP INDEX IF EXISTS idx_emails_thread;
+	CREATE INDEX idx_emails_thread ON emails(mailbox_id, thread_id, created_at, folder, is_archived, is_deleted, is_starred);
+	CREATE INDEX IF NOT EXISTS idx_emails_scheduled ON emails(created_at) WHERE folder = 'scheduled';
+	CREATE INDEX IF NOT EXISTS idx_emails_sent_by ON emails(provider, created_at) WHERE folder = 'sent';
+	CREATE INDEX IF NOT EXISTS idx_emails_unread ON emails(mailbox_id, thread_id)
+		WHERE folder = 'inbox' AND is_unread = 1 AND is_archived = 0 AND is_deleted = 0;
+	CREATE INDEX IF NOT EXISTS idx_emails_trash ON emails(mailbox_id) WHERE is_deleted = 1;
+	DROP INDEX IF EXISTS idx_emails_folder;
+	DROP INDEX IF EXISTS idx_emails_is_deleted;
+	DROP INDEX IF EXISTS idx_emails_is_starred;
+	DROP INDEX IF EXISTS idx_emails_created_at;
+	DROP INDEX IF EXISTS idx_emails_mailbox;
+
+	-- Full-text search index, kept in step with emails by triggers.
+	CREATE VIRTUAL TABLE IF NOT EXISTS emails_fts USING fts5(
+		subject, from_name, from_email, to_recipients, body_text,
+		content = 'emails', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2');
+	CREATE TRIGGER IF NOT EXISTS emails_fts_insert AFTER INSERT ON emails BEGIN
+		INSERT INTO emails_fts(rowid, subject, from_name, from_email, to_recipients, body_text)
+		VALUES (new.id, new.subject, new.from_name, new.from_email, new.to_recipients, new.body_text);
+	END;
+	CREATE TRIGGER IF NOT EXISTS emails_fts_delete AFTER DELETE ON emails BEGIN
+		INSERT INTO emails_fts(emails_fts, rowid, subject, from_name, from_email, to_recipients, body_text)
+		VALUES ('delete', old.id, old.subject, old.from_name, old.from_email, old.to_recipients, old.body_text);
+	END;
+	CREATE TRIGGER IF NOT EXISTS emails_fts_update AFTER UPDATE OF subject, from_name, from_email, to_recipients, body_text ON emails BEGIN
+		INSERT INTO emails_fts(emails_fts, rowid, subject, from_name, from_email, to_recipients, body_text)
+		VALUES ('delete', old.id, old.subject, old.from_name, old.from_email, old.to_recipients, old.body_text);
+		INSERT INTO emails_fts(rowid, subject, from_name, from_email, to_recipients, body_text)
+		VALUES (new.id, new.subject, new.from_name, new.from_email, new.to_recipients, new.body_text);
+	END;
+	INSERT INTO emails_fts(emails_fts) VALUES ('rebuild');
+	ANALYZE;`},
 }
 
 func (d *DB) migrate() error {
@@ -343,8 +380,12 @@ func threadFor(q querier, m *models.Email) string {
 		return thread
 	}
 	if base := baseSubject(m.Subject); m.Folder != "sent" && m.Folder != "scheduled" && base != "" && base != strings.TrimSpace(m.Subject) {
-		rows, err := q.Query(`SELECT subject, thread_id FROM emails
-			WHERE mailbox_id = ? AND thread_id != '' AND instr(subject, ?) > 0
+		// ponytail: only the newest 2000 messages are searched, so a reply to an older
+		// conversation starts a new one; widen the window if that turns out to matter.
+		rows, err := q.Query(`SELECT subject, thread_id FROM (
+				SELECT subject, thread_id, from_email, to_recipients, cc_recipients, created_at FROM emails
+				WHERE mailbox_id = ? AND thread_id != '' ORDER BY created_at DESC LIMIT 2000)
+			WHERE instr(subject, ?) > 0
 			AND (from_email = ? COLLATE NOCASE OR instr(lower(to_recipients || COALESCE(cc_recipients, '')), lower(?)) > 0)
 			ORDER BY created_at DESC LIMIT 20`, m.MailboxID, base, m.FromEmail, `"`+m.FromEmail+`"`)
 		if err == nil {
@@ -483,64 +524,99 @@ func (d *DB) GetEmail(id int64) (*models.Email, error) {
 	return m, rows.Err()
 }
 
-func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, offset int) ([]models.Email, int, error) {
-	conditions := []string{"mailbox_id = ?"}
-	args := []any{mailboxID}
+// listCols is emailCols without the bodies: a list shows subject and snippet only.
+var listCols = strings.NewReplacer("body_text,", "'',", "body_html,", "'',").Replace(emailCols)
 
-	switch viewFolder {
+// MaxCount caps how many conversations a list counts. Above it the UI says "banyak",
+// as Gmail does: an exact count of a huge mailbox costs a scan on every load.
+const MaxCount = 1000
+
+// viewFilter is the WHERE clause of a list view, written for table alias t so it can
+// also filter the correlated subquery that keeps one row per conversation.
+func viewFilter(t string, mailboxID int64, view, query string) (string, []any) {
+	c := []string{t + ".mailbox_id = ?"}
+	args := []any{mailboxID}
+	switch view {
 	case "starred":
-		conditions = append(conditions, "is_starred = 1 AND is_deleted = 0")
+		c = append(c, t+".is_starred = 1", t+".is_deleted = 0")
 	case "snoozed", "sent", "drafts", "spam", "scheduled":
-		conditions = append(conditions, "folder = ? AND is_deleted = 0")
-		args = append(args, viewFolder)
+		c = append(c, t+".folder = ?", t+".is_deleted = 0")
+		args = append(args, view)
 	case "important":
-		conditions = append(conditions, "(label = 'Important' OR is_starred = 1) AND is_deleted = 0")
+		c = append(c, "("+t+".label = 'Important' OR "+t+".is_starred = 1)", t+".is_deleted = 0")
 	case "archive":
 		// Conversations whose received mail has all been archived (not spammed or snoozed).
-		conditions = append(conditions, `is_deleted = 0 AND thread_id IN (SELECT thread_id FROM emails
-			WHERE mailbox_id = ? AND is_deleted = 0 AND folder = 'inbox' GROUP BY thread_id HAVING MIN(is_archived) = 1)`)
-		args = append(args, mailboxID)
+		inbox := func(archived int) string {
+			return fmt.Sprintf(`SELECT 1 FROM emails a WHERE a.mailbox_id = %[1]s.mailbox_id AND a.thread_id = %[1]s.thread_id
+				AND a.folder = 'inbox' AND a.is_deleted = 0 AND a.is_archived = %[2]d`, t, archived)
+		}
+		c = append(c, t+".is_deleted = 0", "EXISTS ("+inbox(1)+")", "NOT EXISTS ("+inbox(0)+")")
 	case "trash":
-		conditions = append(conditions, "is_deleted = 1")
+		c = append(c, t+".is_deleted = 1")
 	case "all":
-		conditions = append(conditions, "is_deleted = 0")
+		c = append(c, t+".is_deleted = 0")
 	default:
-		if name, ok := strings.CutPrefix(viewFolder, "label:"); ok {
-			conditions = append(conditions, "label = ? AND is_deleted = 0")
+		if name, ok := strings.CutPrefix(view, "label:"); ok {
+			c = append(c, t+".label = ?", t+".is_deleted = 0")
 			args = append(args, name)
-		} else if name, ok := strings.CutPrefix(viewFolder, "category:"); ok {
-			conditions = append(conditions, "category = ? AND is_deleted = 0")
+		} else if name, ok := strings.CutPrefix(view, "category:"); ok {
+			c = append(c, t+".category = ?", t+".is_deleted = 0")
 			args = append(args, name)
 		} else {
-			conditions = append(conditions, "folder = 'inbox' AND is_archived = 0 AND is_deleted = 0")
+			c = append(c, t+".folder = 'inbox'", t+".is_archived = 0", t+".is_deleted = 0")
 		}
 	}
-
-	if queryStr != "" {
-		conditions = append(conditions, "(subject LIKE ? OR from_name LIKE ? OR from_email LIKE ? OR snippet LIKE ? OR body_text LIKE ?)")
-		q := "%" + queryStr + "%"
-		args = append(args, q, q, q, q, q)
+	if match := ftsQuery(query); match != "" {
+		// The unary + keeps SQLite from driving the query by the matches' rowids, which
+		// reads every matching row (bodies included) when a word is common. Walking the
+		// index newest-first and checking membership stops after one page instead.
+		c = append(c, "+"+t+".id IN (SELECT rowid FROM emails_fts WHERE emails_fts MATCH ?)")
+		args = append(args, match)
 	}
-	where := "WHERE " + strings.Join(conditions, " AND ")
+	return strings.Join(c, " AND "), args
+}
+
+// ftsQuery turns what was typed into an FTS5 query: every word must appear, and the
+// last one may be unfinished. Each word is quoted, so FTS operators typed by the user
+// are searched as text; an address like budi@luar.test becomes a phrase of its parts.
+func ftsQuery(q string) string {
+	var terms []string
+	for _, w := range strings.Fields(q) {
+		if w = strings.ReplaceAll(w, `"`, ""); w != "" {
+			terms = append(terms, `"`+w+`"*`)
+		}
+	}
+	return strings.Join(terms, " ")
+}
+
+// ListEmails returns one page of a view, one row per conversation as in Gmail: the
+// conversation's newest message in the view. total counts conversations up to
+// MaxCount+1. The query walks the mailbox newest-first through idx_emails_view and
+// skips messages with a newer sibling in the view, so a page costs about a page of
+// work however big the mailbox is.
+func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, offset int) ([]models.Email, int, error) {
+	where, args := viewFilter("e", mailboxID, viewFolder, queryStr)
+	newer, newerArgs := viewFilter("n", mailboxID, viewFolder, queryStr)
 
 	var total int
-	if err := d.conn.QueryRow("SELECT COUNT(DISTINCT thread_id) FROM emails "+where, args...).Scan(&total); err != nil {
+	if err := d.conn.QueryRow(`SELECT COUNT(*) FROM (SELECT DISTINCT e.thread_id FROM emails e WHERE `+where+` LIMIT ?)`,
+		append(append([]any{}, args...), MaxCount+1)...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if limit <= 0 {
 		limit = 50
 	}
+	limit = min(limit, 200) // the client picks the page size; keep one request bounded
 
-	// One row per conversation, as in Gmail: its newest message in this view, plus the
-	// conversation's size and whether any of it still sits in Kotak masuk.
-	rows, err := d.conn.Query(`SELECT `+emailCols+`,
+	rows, err := d.conn.Query(`SELECT `+listCols+`,
 		(SELECT COUNT(*) FROM emails t WHERE t.mailbox_id = e.mailbox_id AND t.thread_id = e.thread_id AND t.is_deleted = e.is_deleted),
 		EXISTS (SELECT 1 FROM emails t WHERE t.mailbox_id = e.mailbox_id AND t.thread_id = e.thread_id
 			AND t.folder = 'inbox' AND t.is_archived = 0 AND t.is_deleted = 0)
-		FROM emails e WHERE id IN (SELECT id FROM (
-			SELECT id, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY created_at DESC, id DESC) AS rn FROM emails `+where+`
-		) WHERE rn = 1)
-		ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+		FROM emails e WHERE `+where+`
+		AND NOT EXISTS (SELECT 1 FROM emails n WHERE `+newer+` AND n.thread_id = e.thread_id
+			AND (n.created_at > e.created_at OR (n.created_at = e.created_at AND n.id > e.id)))
+		ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?`,
+		append(append(append([]any{}, args...), newerArgs...), limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -717,16 +793,15 @@ func (d *DB) GetAttachment(id string) (*models.Attachment, error) {
 	return &a, nil
 }
 
+// GetStats returns the counts the sidebar shows. Each reads only a partial index
+// (idx_emails_unread, idx_emails_trash), so clients can poll it on a huge mailbox.
 func (d *DB) GetStats(mailboxID int64) (*models.Stats, error) {
 	s := &models.Stats{}
 	err := d.conn.QueryRow(`SELECT
-		COUNT(DISTINCT CASE WHEN folder = 'inbox' AND is_unread = 1 AND is_deleted = 0 AND is_archived = 0 THEN thread_id END),
-		COALESCE(SUM(is_starred = 1 AND is_deleted = 0), 0),
-		COALESCE(SUM(folder = 'sent' AND is_deleted = 0), 0),
-		COALESCE(SUM(folder = 'drafts' AND is_deleted = 0), 0),
-		COALESCE(SUM(is_deleted = 1), 0)
-		FROM emails WHERE mailbox_id = ?`, mailboxID).
-		Scan(&s.InboxUnread, &s.StarredCount, &s.SentCount, &s.DraftsCount, &s.TrashCount)
+		(SELECT COUNT(DISTINCT thread_id) FROM emails
+			WHERE mailbox_id = ? AND folder = 'inbox' AND is_unread = 1 AND is_archived = 0 AND is_deleted = 0),
+		(SELECT COUNT(*) FROM emails WHERE mailbox_id = ? AND is_deleted = 1)`, mailboxID, mailboxID).
+		Scan(&s.InboxUnread, &s.TrashCount)
 	return s, err
 }
 

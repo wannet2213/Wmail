@@ -269,10 +269,8 @@ func TestSendViaResend(t *testing.T) {
 	if got["html"] != want || !strings.HasSuffix(got["text"].(string), "> > Kapan?") {
 		t.Fatalf("reply html = %v\nwant %s", got["html"], want)
 	}
-	var stats models.Stats
-	json.NewDecoder(e.do(t, root, "GET", path("/api/stats", e.mbA), nil).Body).Decode(&stats)
-	if stats.SentCount != 1 {
-		t.Fatalf("sent count: %d", stats.SentCount)
+	if list, _, _ := e.db.ListEmails(e.mbA, "sent", "", 50, 0); len(list) == 0 {
+		t.Fatal("sent mail not stored")
 	}
 }
 

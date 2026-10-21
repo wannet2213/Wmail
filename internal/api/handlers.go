@@ -107,7 +107,8 @@ func (a *API) ListEmails(w http.ResponseWriter, r *http.Request, u *models.User)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"emails": emails, "total": total, "folder": folder})
+	// capped: there are more than db.MaxCount conversations; the UI then says "banyak".
+	writeJSON(w, http.StatusOK, map[string]any{"emails": emails, "total": min(total, db.MaxCount), "capped": total > db.MaxCount, "folder": folder})
 }
 
 func (a *API) GetEmail(w http.ResponseWriter, r *http.Request, u *models.User) {
