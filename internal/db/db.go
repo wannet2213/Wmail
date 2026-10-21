@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,6 +144,7 @@ var migrations = []migration{
 	CREATE INDEX idx_emails_mailbox ON emails(mailbox_id);
 	CREATE UNIQUE INDEX idx_emails_mailbox_msgid ON emails(mailbox_id, message_id) WHERE message_id != '';`},
 	{run: normalizeTimestamps},
+	{run: linkThreads},
 }
 
 func (d *DB) migrate() error {
@@ -250,7 +252,80 @@ func normalizeTimestamps(tx *sql.Tx) error {
 	return nil
 }
 
+// linkThreads groups mail stored before conversations existed. Oldest first, so each
+// reply finds the thread of the message it answers. Timestamps are not scanned: a row
+// migration 3 could not repair must not stop the server from starting.
+func linkThreads(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, COALESCE(mailbox_id, 0), COALESCE(message_id, ''), COALESCE(in_reply_to, ''),
+		subject, from_email, COALESCE(folder, '') FROM emails ORDER BY created_at, id`)
+	if err != nil {
+		return err
+	}
+	var list []models.Email
+	for rows.Next() {
+		var m models.Email
+		if err := rows.Scan(&m.ID, &m.MailboxID, &m.MessageID, &m.InReplyTo, &m.Subject, &m.FromEmail, &m.Folder); err != nil {
+			rows.Close()
+			return err
+		}
+		list = append(list, m)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for i := range list {
+		if _, err := tx.Exec(`UPDATE emails SET thread_id = ? WHERE id = ?`, threadFor(tx, &list[i]), list[i].ID); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(mailbox_id, thread_id)`)
+	return err
+}
+
 /* ---------- emails ---------- */
+
+type querier interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+var replyPrefix = regexp.MustCompile(`(?i)^\s*((re|fwd?)\s*(\[\d+\])?\s*:\s*)+`)
+
+// baseSubject drops the Re:/Fwd: prefixes replies and forwards add.
+func baseSubject(s string) string { return strings.TrimSpace(replyPrefix.ReplaceAllString(s, "")) }
+
+// threadFor picks the conversation m joins: the one holding the message its In-Reply-To
+// names, else (incoming replies only) the newest thread with the same base subject that
+// the sender took part in. The fallback is what links replies to mail sent through
+// Resend, which replaces our Message-ID with its own. Anything else starts a thread.
+func threadFor(q querier, m *models.Email) string {
+	var thread string
+	if m.InReplyTo != "" && q.QueryRow(`SELECT thread_id FROM emails WHERE mailbox_id = ? AND message_id = ? AND thread_id != ''`,
+		m.MailboxID, m.InReplyTo).Scan(&thread) == nil {
+		return thread
+	}
+	if base := baseSubject(m.Subject); m.Folder != "sent" && base != "" && base != strings.TrimSpace(m.Subject) {
+		rows, err := q.Query(`SELECT subject, thread_id FROM emails
+			WHERE mailbox_id = ? AND thread_id != '' AND instr(subject, ?) > 0
+			AND (from_email = ? COLLATE NOCASE OR instr(lower(to_recipients || COALESCE(cc_recipients, '')), lower(?)) > 0)
+			ORDER BY created_at DESC LIMIT 20`, m.MailboxID, base, m.FromEmail, `"`+m.FromEmail+`"`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var subject string
+				if rows.Scan(&subject, &thread) == nil && strings.EqualFold(baseSubject(subject), base) {
+					return thread
+				}
+			}
+		}
+	}
+	if m.MessageID != "" {
+		return m.MessageID
+	}
+	return "<" + rand.Text() + "@wmail>"
+}
 
 const emailCols = `id, COALESCE(mailbox_id, 0), provider, message_id, in_reply_to, thread_id, from_name, from_email,
 	to_recipients, cc_recipients, subject, snippet, body_text,
@@ -259,16 +334,17 @@ const emailCols = `id, COALESCE(mailbox_id, 0), provider, message_id, in_reply_t
 
 type scanner interface{ Scan(dest ...any) error }
 
-func scanEmail(row scanner) (*models.Email, error) {
+// scanEmail reads emailCols, then any extra columns the query appends into extra.
+func scanEmail(row scanner, extra ...any) (*models.Email, error) {
 	var m models.Email
 	var toJSON, ccJSON, msgID, inReplyTo, threadID, fromName, snippet, bodyText, bodyHTML, category, label sql.NullString
 	var unread, starred, archived, deleted, hasAtt int
-	err := row.Scan(
+	err := row.Scan(append([]any{
 		&m.ID, &m.MailboxID, &m.Provider, &msgID, &inReplyTo, &threadID, &fromName, &m.FromEmail,
 		&toJSON, &ccJSON, &m.Subject, &snippet, &bodyText,
 		&bodyHTML, &unread, &starred, &archived, &deleted,
 		&m.Folder, &category, &label, &hasAtt, &m.CreatedAt, &m.UpdatedAt,
-	)
+	}, extra...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -294,6 +370,9 @@ func (d *DB) SaveEmail(m *models.Email) error {
 	}
 	m.UpdatedAt = time.Now()
 	m.HasAttachments = m.HasAttachments || len(m.Attachments) > 0
+	if m.ThreadID == "" {
+		m.ThreadID = threadFor(d.conn, m)
+	}
 
 	tx, err := d.conn.Begin()
 	if err != nil {
@@ -399,14 +478,23 @@ func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, off
 	where := "WHERE " + strings.Join(conditions, " AND ")
 
 	var total int
-	if err := d.conn.QueryRow("SELECT COUNT(*) FROM emails "+where, args...).Scan(&total); err != nil {
+	if err := d.conn.QueryRow("SELECT COUNT(DISTINCT thread_id) FROM emails "+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if limit <= 0 {
 		limit = 50
 	}
 
-	rows, err := d.conn.Query("SELECT "+emailCols+" FROM emails "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, limit, offset)...)
+	// One row per conversation, as in Gmail: its newest message in this view, plus the
+	// conversation's size and whether any of it still sits in Kotak masuk.
+	rows, err := d.conn.Query(`SELECT `+emailCols+`,
+		(SELECT COUNT(*) FROM emails t WHERE t.mailbox_id = e.mailbox_id AND t.thread_id = e.thread_id AND t.is_deleted = e.is_deleted),
+		EXISTS (SELECT 1 FROM emails t WHERE t.mailbox_id = e.mailbox_id AND t.thread_id = e.thread_id
+			AND t.folder = 'inbox' AND t.is_archived = 0 AND t.is_deleted = 0)
+		FROM emails e WHERE id IN (SELECT id FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY created_at DESC, id DESC) AS rn FROM emails `+where+`
+		) WHERE rn = 1)
+		ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -414,25 +502,38 @@ func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, off
 
 	list := []models.Email{}
 	for rows.Next() {
-		m, err := scanEmail(rows)
+		var count, inInbox int
+		m, err := scanEmail(rows, &count, &inInbox)
 		if err != nil {
 			return nil, 0, err
 		}
+		m.ThreadCount, m.InInbox = count, inInbox == 1
 		list = append(list, *m)
 	}
 	return list, total, rows.Err()
 }
 
+// sameThread matches every message in the conversation of the email whose id is bound.
+const sameThread = "(mailbox_id, thread_id) = (SELECT mailbox_id, thread_id FROM emails WHERE id = ?)"
+
+// UpdateEmailStatus stars one message; every other change applies to its whole
+// conversation, as in Gmail. Sent copies keep their folder and read state.
 func (d *DB) UpdateEmailStatus(id int64, req models.UpdateStatusRequest) error {
+	if req.IsStarred != nil {
+		if _, err := d.conn.Exec("UPDATE emails SET is_starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", boolToInt(*req.IsStarred), id); err != nil {
+			return err
+		}
+	}
 	var sets []string
 	var args []any
 	add := func(col string, v any) { sets = append(sets, col+" = ?"); args = append(args, v) }
+	keepSent := func(col string, v any) {
+		sets = append(sets, col+" = CASE WHEN folder = 'sent' THEN "+col+" ELSE ? END")
+		args = append(args, v)
+	}
 
 	if req.IsUnread != nil {
-		add("is_unread", boolToInt(*req.IsUnread))
-	}
-	if req.IsStarred != nil {
-		add("is_starred", boolToInt(*req.IsStarred))
+		keepSent("is_unread", boolToInt(*req.IsUnread))
 	}
 	if req.IsArchived != nil {
 		add("is_archived", boolToInt(*req.IsArchived))
@@ -441,7 +542,7 @@ func (d *DB) UpdateEmailStatus(id int64, req models.UpdateStatusRequest) error {
 		add("is_deleted", boolToInt(*req.IsDeleted))
 	}
 	if req.Folder != nil {
-		add("folder", *req.Folder)
+		keepSent("folder", *req.Folder)
 	}
 	if req.Label != nil {
 		add("label", *req.Label)
@@ -450,8 +551,42 @@ func (d *DB) UpdateEmailStatus(id int64, req models.UpdateStatusRequest) error {
 		return nil
 	}
 	sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
-	_, err := d.conn.Exec("UPDATE emails SET "+strings.Join(sets, ", ")+" WHERE id = ?", append(args, id)...)
+	_, err := d.conn.Exec("UPDATE emails SET "+strings.Join(sets, ", ")+" WHERE "+sameThread, append(args, id)...)
 	return err
+}
+
+// Thread returns the conversation m belongs to, oldest first, with attachments.
+// Trashed messages show only in a trashed conversation and the rest only outside it.
+func (d *DB) Thread(m *models.Email) ([]models.Email, error) {
+	rows, err := d.conn.Query(`SELECT id FROM emails WHERE mailbox_id = ? AND thread_id = ? AND is_deleted = ? ORDER BY created_at, id`,
+		m.MailboxID, m.ThreadID, boolToInt(m.IsDeleted))
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	// ponytail: one GetEmail per message; batch the attachment query if threads get long.
+	thread := []models.Email{}
+	for _, id := range ids {
+		e, err := d.GetEmail(id)
+		if err != nil {
+			return nil, err
+		}
+		thread = append(thread, *e)
+	}
+	return thread, nil
 }
 
 // deleteEmailsWhere removes matching emails and their attachment files on disk.
@@ -478,8 +613,9 @@ func (d *DB) deleteEmailsWhere(where string, args ...any) error {
 	return nil
 }
 
+// DeleteEmail permanently removes the trashed messages of id's conversation.
 func (d *DB) DeleteEmail(id int64) error {
-	return d.deleteEmailsWhere("id = ?", id)
+	return d.deleteEmailsWhere("is_deleted = 1 AND "+sameThread, id)
 }
 
 func (d *DB) EmptyTrash(mailboxID int64) error {
@@ -499,7 +635,7 @@ func (d *DB) GetAttachment(id string) (*models.Attachment, error) {
 func (d *DB) GetStats(mailboxID int64) (*models.Stats, error) {
 	s := &models.Stats{}
 	err := d.conn.QueryRow(`SELECT
-		COALESCE(SUM(folder = 'inbox' AND is_unread = 1 AND is_deleted = 0 AND is_archived = 0), 0),
+		COUNT(DISTINCT CASE WHEN folder = 'inbox' AND is_unread = 1 AND is_deleted = 0 AND is_archived = 0 THEN thread_id END),
 		COALESCE(SUM(is_starred = 1 AND is_deleted = 0), 0),
 		COALESCE(SUM(folder = 'sent' AND is_deleted = 0), 0),
 		COALESCE(SUM(folder = 'drafts' AND is_deleted = 0), 0),

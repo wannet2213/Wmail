@@ -18,17 +18,24 @@ let openId = null;
 let selected = new Set();
 let moreOpen = false;
 let pendingAttachments = [];
+let expanded = new Set(); // ids of the open conversation's messages shown in full
 
 const $ = (s) => document.querySelector(s);
 const rowsEl = $("#mailrows");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const avColor = (id) => AV_COLORS[Math.abs(Number(id || 0)) % AV_COLORS.length];
+// One color per sender, so a conversation reads the same all the way down.
+const avColor = (s) => AV_COLORS[[...String(s ?? "")].reduce((h, c) => h + c.charCodeAt(0), 0) % AV_COLORS.length];
 const initial = (name, email) => (name || email || "?").trim().charAt(0).toUpperCase();
 const currentMailbox = () => me.mailboxes.find((m) => m.id === mailboxId);
 const sendable = () => me.mailboxes.filter((m) => m.canSend);
 // Receive-only ("terima saja") grants are read-only: the server refuses moves and deletes.
 const canManage = () => !!currentMailbox()?.canSend;
+const lc = (s) => String(s || "").toLowerCase();
+const isInbox = (x) => x.folder === "inbox" && !x.isArchived && !x.isDeleted;
+// A conversation made only of our own sent mail has no inbox to go back to.
+const movable = (x) => x.isDeleted || x.folder !== "sent" || x.threadCount > 1;
+const threadOf = (m) => (m.thread?.length ? m.thread : [m]);
 
 function formatSize(bytes) {
   if (!bytes || bytes <= 0) return "0 B";
@@ -138,6 +145,9 @@ async function apiGetEmailDetail(id) {
     const res = await api(`/api/emails/${id}`);
     if (!res.ok) throw new Error("Gagal mengambil detail email");
     currentMailDetail = await res.json();
+    // Like Gmail: the newest message and anything unread open; the rest fold to one line.
+    const t = threadOf(currentMailDetail);
+    expanded = new Set(t.filter((x, i) => x.isUnread || i === t.length - 1).map((x) => x.id));
     const m = mails.find((x) => x.id === id);
     if (m) m.isUnread = false;
     renderReader();
@@ -265,8 +275,9 @@ function rowHtml(m) {
     <button class="iconbtn row-star star-btn ${m.isStarred ? "is-starred" : ""}" aria-label="${m.isStarred ? "Hapus bintang" : "Beri bintang"}" data-act="star">
       <span class="${m.isStarred ? "msf" : "ms"}">star</span>
     </button>
-    <span class="row-sender">${esc(fromLabel)}</span>
+    <span class="row-sender"><span class="row-name">${esc(fromLabel)}</span>${m.threadCount > 1 ? `<span class="count">${m.threadCount}</span>` : ""}</span>
     <span class="row-main">
+      ${view !== "inbox" && m.inInbox ? `<span class="row-chip">Kotak masuk</span>` : ""}
       <span class="row-subject">${m.subject ? esc(m.subject) : '<span style="opacity:.55">(tanpa subjek)</span>'}</span>
       <span class="row-snippet">— ${esc(m.snippet || "")}</span>
     </span>
@@ -274,9 +285,11 @@ function rowHtml(m) {
     <span class="row-right">
       <span class="row-date">${esc(formatDate(m.createdAt))}</span>
       <span class="row-actions">
-        ${canManage() ? `<button class="iconbtn" aria-label="Arsipkan" data-act="archive"><span class="ms">archive</span></button>
-        <button class="iconbtn" aria-label="Hapus" data-act="delete"><span class="ms">delete</span></button>` : ""}
-        <button class="iconbtn" aria-label="Tandai belum dibaca" data-act="unread"><span class="ms">mark_email_unread</span></button>
+        ${canManage() ? `${m.inInbox ? `<button class="iconbtn" aria-label="Arsipkan" data-act="archive"><span class="ms">archive</span></button>`
+          : movable(m) ? `<button class="iconbtn" aria-label="Pindahkan ke Kotak masuk" data-act="inbox"><span class="msf">inbox</span></button>` : ""}
+        <button class="iconbtn" aria-label="${view === "trash" ? "Hapus permanen" : "Hapus"}" data-act="delete"><span class="ms">delete</span></button>` : ""}
+        ${m.isUnread ? `<button class="iconbtn" aria-label="Tandai sudah dibaca" data-act="read"><span class="msf">drafts</span></button>`
+          : `<button class="iconbtn" aria-label="Tandai belum dibaca" data-act="unread"><span class="ms">mark_email_unread</span></button>`}
         ${canManage() ? `<button class="iconbtn" aria-label="Tunda" data-act="snooze"><span class="ms">schedule</span></button>` : ""}
       </span>
     </span>
@@ -300,6 +313,7 @@ function renderRows() {
   const mb = currentMailbox();
   document.title = `${stats.inboxUnread ? `(${stats.inboxUnread}) ` : ""}${mb ? mb.address : "Wmail"} - Wmail`;
   $("#pageCount").textContent = totalMails > 0 ? `1–${mails.length} dari ${totalMails}` : "";
+  syncSelAll();
 }
 
 // Email HTML goes into a sandboxed iframe: scripts, forms and plugins are blocked,
@@ -322,131 +336,207 @@ function emailFrame(html) {
   return frame;
 }
 
+function textHtml(text) {
+  return (text || "").split(/\r?\n\r?\n/).map((p) => `<p>${esc(p).replace(/\r?\n/g, "<br>")}</p>`).join("");
+}
+
+function attachmentsHtml(x) {
+  if (!x.attachments?.length) return "";
+  return `<div class="reader-content"><div class="reader-attachments-section">
+      <div class="reader-attachments-title"><span class="ms">attach_file</span><span>${x.attachments.length} lampiran</span></div>
+      <div class="reader-attachments-grid">
+        ${x.attachments.map((att) => `
+          <a href="/api/attachments/${encodeURIComponent(att.id)}" target="_blank" rel="noopener" class="reader-att-card" title="Unduh ${esc(att.filename)}">
+            <span class="ms">attach_file</span>
+            <div class="reader-att-info">
+              <span class="reader-att-name">${esc(att.filename)}</span>
+              <span class="reader-att-size">${formatSize(att.sizeBytes)}</span>
+            </div>
+          </a>`).join("")}
+      </div>
+    </div></div>`;
+}
+
+function messageHtml(x, open, canReply, foldable) {
+  const avatar = `<span class="avatar" style="background:${avColor(x.fromEmail)}" aria-hidden="true">${esc(initial(x.fromName, x.fromEmail))}</span>`;
+  const toggle = foldable ? `data-toggle role="button" tabindex="0" aria-expanded="${open}"` : "";
+  if (!open) {
+    return `<div class="msg is-folded" data-msg="${x.id}">
+      <div class="reader-msg-head" ${toggle}>
+        ${avatar}
+        <div class="reader-who">
+          <div class="reader-from">${esc(x.fromName || x.fromEmail)}</div>
+          <div class="reader-meta msg-snippet">${esc(x.snippet || "")}</div>
+        </div>
+        <span class="reader-meta">${esc(formatDate(x.createdAt))}</span>
+      </div>
+    </div>`;
+  }
+  const cc = x.ccRecipients?.length ? `, cc ${x.ccRecipients.join(", ")}` : "";
+  return `<div class="msg" data-msg="${x.id}">
+    <div class="reader-msg-head" ${toggle}>
+      ${avatar}
+      <div class="reader-who">
+        <div class="reader-from">${esc(x.fromName || x.fromEmail)} <span class="addr">&lt;${esc(x.fromEmail || "unknown")}&gt;</span></div>
+        <div class="reader-meta">kepada ${esc((x.toRecipients || []).join(", ") + cc)} — ${esc(formatFullDate(x.createdAt))}</div>
+      </div>
+      <span class="reader-msg-actions">
+        <button class="iconbtn" data-star aria-label="${x.isStarred ? "Hapus bintang" : "Beri bintang"}">
+          <span class="${x.isStarred ? "msf star-on" : "ms"}">star</span>
+        </button>
+        ${canReply ? `<button class="iconbtn" data-reply="reply" aria-label="Balas"><span class="ms">reply</span></button>
+        <button class="iconbtn" data-reply="forward" aria-label="Teruskan"><span class="ms">forward</span></button>` : ""}
+      </span>
+    </div>
+    <div class="reader-content" data-body>${x.bodyHtml?.trim() ? "" : textHtml(x.bodyText)}</div>
+    ${attachmentsHtml(x)}
+  </div>`;
+}
+
+// Reply-all only makes sense when someone besides the sender and us is on the message.
+function othersOn(x) {
+  const self = lc(currentMailbox()?.address);
+  return new Set([x.fromEmail, ...(x.toRecipients || []), ...(x.ccRecipients || [])].map(lc).filter((a) => a && a !== self)).size;
+}
+
 function renderReader() {
   const r = $("#reader");
   if (!r) return;
+  const comp = $("#compose");
+  // An inline reply belongs to the conversation it was started in.
+  if (comp.classList.contains("is-inline") && !comp.hidden && Number(comp.dataset.for) !== openId) closeCompose();
   if (!openId || !currentMailDetail) {
     r.hidden = true;
     rowsEl.hidden = false;
+    $(".list-tools").hidden = false;
     return;
   }
 
   r.hidden = false;
   rowsEl.hidden = true;
-  for (const id of ["#btnRArchive", "#btnRSpam", "#btnRDelete", "#btnRSnooze"]) $(id).hidden = !canManage();
+  $(".list-tools").hidden = true;
 
   const m = currentMailDetail;
+  const thread = threadOf(m);
+  const last = thread[thread.length - 1];
+  const inbox = thread.some(isInbox);
+  for (const id of ["#btnRSpam", "#btnRDelete", "#btnRSnooze"]) $(id).hidden = !canManage();
+  $("#btnRArchive").hidden = !canManage() || !inbox;
+  $("#btnRInbox").hidden = !canManage() || inbox || !thread.some((x) => x.isDeleted || x.folder !== "sent");
   const pos = Math.max(1, mails.findIndex((x) => x.id === m.id) + 1);
   $("#readerPos").textContent = `${pos} dari ${mails.length || 1}`;
 
-  let attachmentsHtml = "";
-  if (m.attachments && m.attachments.length > 0) {
-    attachmentsHtml = `
-      <div class="reader-attachments-section">
-        <div class="reader-attachments-title">
-          <span class="ms">attach_file</span>
-          <span>${m.attachments.length} lampiran</span>
-        </div>
-        <div class="reader-attachments-grid">
-          ${m.attachments.map((att) => `
-            <a href="/api/attachments/${encodeURIComponent(att.id)}" target="_blank" rel="noopener" class="reader-att-card" title="Unduh ${esc(att.filename)}">
-              <span class="ms">attach_file</span>
-              <div class="reader-att-info">
-                <span class="reader-att-name">${esc(att.filename)}</span>
-                <span class="reader-att-size">${formatSize(att.sizeBytes)}</span>
-              </div>
-            </a>
-          `).join("")}
-        </div>
-      </div>`;
-  }
-
-  const hasHtml = m.bodyHtml && m.bodyHtml.trim();
-  const textHtml = (m.bodyText || "").split(/\r?\n\r?\n/).map((p) => `<p>${esc(p).replace(/\r?\n/g, "<br>")}</p>`).join("");
   const canReply = currentMailbox()?.canSend;
-
-  $("#readerBody").innerHTML = `
-    <h1 class="reader-subject">${m.subject ? esc(m.subject) : "(tanpa subjek)"}</h1>
-    <div class="reader-msg-head">
-      <span class="avatar" style="background:${avColor(m.id)}" aria-hidden="true">${esc(initial(m.fromName, m.fromEmail))}</span>
-      <div class="reader-who">
-        <div class="reader-from">${esc(m.fromName || m.fromEmail)} <span class="addr">&lt;${esc(m.fromEmail || "unknown")}&gt;</span></div>
-        <div class="reader-meta">kepada ${esc((m.toRecipients || []).join(", "))} — ${esc(formatFullDate(m.createdAt))}</div>
-      </div>
-      <span class="reader-msg-actions">
-        <button class="iconbtn" aria-label="${m.isStarred ? "Hapus bintang" : "Beri bintang"}" id="readerStarBtn">
-          <span class="${m.isStarred ? "msf" : "ms"}">star</span>
-        </button>
-        ${canReply ? `<button class="iconbtn" aria-label="Balas" id="readerReplyBtn"><span class="ms">reply</span></button>
-        <button class="iconbtn" aria-label="Teruskan" id="readerForwardBtn"><span class="ms">forward</span></button>` : ""}
-      </span>
-    </div>
-    <div class="reader-content" id="readerContent">${hasHtml ? "" : textHtml}</div>
-    ${attachmentsHtml ? `<div class="reader-content">${attachmentsHtml}</div>` : ""}
+  const subject = thread[0].subject || m.subject;
+  $("#readerThread").innerHTML = `
+    <h1 class="reader-subject">${subject ? esc(subject) : "(tanpa subjek)"}</h1>
+    ${thread.map((x) => messageHtml(x, expanded.has(x.id), canReply, thread.length > 1)).join("")}
     ${canReply ? `<div class="reader-quick">
-      <button class="quick-btn" id="btnQuickReply"><span class="ms">reply</span>Balas</button>
-      <button class="quick-btn" id="btnQuickForward"><span class="ms">forward</span>Teruskan</button>
+      <button class="quick-btn" data-reply="reply"><span class="ms">reply</span>Balas</button>
+      ${othersOn(last) > 1 ? `<button class="quick-btn" data-reply="replyAll"><span class="ms">reply_all</span>Balas ke semua</button>` : ""}
+      <button class="quick-btn" data-reply="forward"><span class="ms">forward</span>Teruskan</button>
     </div>` : `<p class="reader-note">Mailbox ini hanya bisa dibaca (hak terima saja).</p>`}`;
 
-  if (hasHtml) $("#readerContent").appendChild(emailFrame(m.bodyHtml));
-
-  $("#readerStarBtn").addEventListener("click", async () => {
-    m.isStarred = !m.isStarred;
-    await apiUpdateEmail(m.id, { isStarred: m.isStarred });
-    renderReader();
-    apiGetEmails();
-  });
-  for (const id of ["#readerReplyBtn", "#btnQuickReply"]) $(id)?.addEventListener("click", () => replyEmail(m));
-  for (const id of ["#readerForwardBtn", "#btnQuickForward"]) $(id)?.addEventListener("click", () => forwardEmail(m));
+  for (const x of thread) {
+    if (expanded.has(x.id) && x.bodyHtml?.trim()) $(`[data-msg="${x.id}"] [data-body]`).appendChild(emailFrame(x.bodyHtml));
+  }
 }
 
-/* ---------- Reply & Forward ---------- */
+$("#readerThread").addEventListener("click", async (e) => {
+  const m = currentMailDetail;
+  if (!m) return;
+  const thread = threadOf(m);
+  const msgEl = e.target.closest("[data-msg]");
+  // Buttons inside a message act on it; the ones under the conversation act on the newest.
+  const x = msgEl ? thread.find((t) => t.id === Number(msgEl.dataset.msg)) : thread[thread.length - 1];
+  const btn = e.target.closest("button");
+  if (btn?.dataset.reply) return startReply(x, btn.dataset.reply);
+  if (btn?.hasAttribute("data-star")) {
+    x.isStarred = !x.isStarred;
+    await apiUpdateEmail(x.id, { isStarred: x.isStarred });
+    return renderReader();
+  }
+  if (!btn && e.target.closest("[data-toggle]")) {
+    expanded.has(x.id) ? expanded.delete(x.id) : expanded.add(x.id);
+    renderReader();
+  }
+});
+$("#readerThread").addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-toggle]")) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
+/* ---------- Reply & Forward (inline, under the conversation) ---------- */
 
 function quoteHeader(m) {
   const author = m.fromName ? `${m.fromName} <${m.fromEmail}>` : m.fromEmail;
   return { date: formatFullDate(m.createdAt), author };
 }
 
-function replyEmail(m) {
-  openCompose();
-  $("#composeTo").value = m.folder === "sent" ? (m.toRecipients || []).join(", ") : (m.fromEmail || "");
-  const sub = m.subject || "";
-  $("#composeSubject").value = /^re:/i.test(sub) ? sub : `Re: ${sub}`;
-  $("#composeInReplyTo").value = m.messageId || "";
-  const { date, author } = quoteHeader(m);
-  const quoteBody = (m.bodyText || "").split("\n").map((l) => `> ${l}`).join("\n");
-  $("#composeBody").value = `\n\nPada ${date}, ${author} menulis:\n${quoteBody}`;
-  $("#composeBody").focus();
-  $("#composeBody").setSelectionRange(0, 0);
+function setQuote(text, open) {
+  $("#composeQuote").value = text;
+  $("#composeQuote").hidden = !open;
+  $("#btnQuote").hidden = false;
+  $("#btnQuote").setAttribute("aria-expanded", String(open));
 }
 
-function forwardEmail(m) {
-  openCompose();
-  $("#composeTo").value = "";
+// startReply opens the reply box under the conversation. mode: reply | replyAll | forward.
+function startReply(m, mode) {
+  resetCompose();
+  openCompose(true);
   const sub = m.subject || "";
-  $("#composeSubject").value = /^fwd:/i.test(sub) ? sub : `Fwd: ${sub}`;
-  $("#composeInReplyTo").value = "";
   const { date, author } = quoteHeader(m);
-  $("#composeBody").value = `\n\n---------- Pesan yang diteruskan ---------\nDari: ${author}\nTanggal: ${date}\nSubjek: ${m.subject}\nKepada: ${(m.toRecipients || []).join(", ")}\n\n${m.bodyText || ""}`;
-  $("#composeTo").focus();
+  $("#composeMode").textContent = mode === "replyAll" ? "reply_all" : mode;
+  // Gmail keeps forwards in the conversation too, so both carry In-Reply-To.
+  $("#composeInReplyTo").value = m.messageId || "";
+  if (mode === "forward") {
+    $("#composeSubject").value = /^fwd?:/i.test(sub) ? sub : `Fwd: ${sub}`;
+    setQuote(`---------- Pesan yang diteruskan ---------\nDari: ${author}\nTanggal: ${date}\nSubjek: ${sub}\nKepada: ${(m.toRecipients || []).join(", ")}\n\n${m.bodyText || ""}`, true);
+    $("#composeTo").focus();
+  } else {
+    const self = lc(currentMailbox()?.address);
+    // Replying to our own message goes to the people we sent it to.
+    const mine = lc(m.fromEmail) === self;
+    const to = mine ? m.toRecipients || [] : [m.fromEmail];
+    const seen = new Set([self, ...to.map(lc)]);
+    const cc = mode !== "replyAll" ? [] : [...(mine ? [] : m.toRecipients || []), ...(m.ccRecipients || [])]
+      .filter((a) => !seen.has(lc(a)) && seen.add(lc(a)));
+    $("#composeTo").value = to.join(", ");
+    $("#composeCc").value = cc.join(", ");
+    $("#composeCcRow").hidden = !cc.length;
+    $("#composeSubject").value = /^re:/i.test(sub) ? sub : `Re: ${sub}`;
+    setQuote(`Pada ${date}, ${author} menulis:\n${(m.bodyText || "").split("\n").map((l) => `> ${l}`).join("\n")}`, false);
+    $("#composeBody").focus();
+  }
+  $("#compose").scrollIntoView({ block: "nearest" });
 }
 
 /* ---------- Snackbar ---------- */
 
-function showSnackbar(text) {
+function showSnackbar(text, undo) {
   const sn = $("#snackbar");
   $("#snackText").textContent = text;
+  $("#snackUndo").hidden = !undo;
+  $("#snackUndo").onclick = () => { sn.hidden = true; undo(); };
   sn.hidden = false;
   clearTimeout(showSnackbar._t);
-  showSnackbar._t = setTimeout(() => { sn.hidden = true; }, 4000);
+  showSnackbar._t = setTimeout(() => { sn.hidden = true; }, undo ? 8000 : 4000);
 }
 
 /* ---------- Row Click & Actions ---------- */
 
-async function moveOut(id, patch, message) {
-  await apiUpdateEmail(id, patch);
-  showSnackbar(message);
-  if (openId === id) {
+// moveOut applies patch to each conversation (patch null = delete for good) and,
+// given undo, offers to revert it from the snackbar.
+async function moveOut(ids, patch, message, undo) {
+  await Promise.all(ids.map((id) => (patch ? apiUpdateEmail(id, patch) : apiDeleteEmail(id))));
+  showSnackbar(message, undo && (async () => {
+    await Promise.all(ids.map((id) => apiUpdateEmail(id, undo)));
+    apiGetEmails();
+  }));
+  selected.clear();
+  if (ids.includes(openId)) {
     openId = null;
     currentMailDetail = null;
     renderReader();
@@ -454,12 +544,17 @@ async function moveOut(id, patch, message) {
   apiGetEmails();
 }
 
+// Every action takes conversation ids; the server applies it to the whole conversation.
 const ACTIONS = {
-  archive: (id) => moveOut(id, { isArchived: true }, "Email diarsipkan."),
-  delete: (id) => moveOut(id, { isDeleted: true }, "Email dipindahkan ke Sampah."),
-  snooze: (id) => moveOut(id, { folder: "snoozed" }, "Email ditunda."),
-  spam: (id) => moveOut(id, { folder: "spam" }, "Email ditandai sebagai spam."),
-  unread: (id) => moveOut(id, { isUnread: true }, "Ditandai belum dibaca."),
+  archive: (ids) => moveOut(ids, { isArchived: true }, "Percakapan diarsipkan.", { isArchived: false }),
+  inbox: (ids) => moveOut(ids, { isArchived: false, isDeleted: false, folder: "inbox" }, "Dipindahkan ke Kotak masuk."),
+  delete: (ids) => view === "trash"
+    ? confirm("Hapus permanen percakapan yang dipilih?") && moveOut(ids, null, "Dihapus permanen.")
+    : moveOut(ids, { isDeleted: true }, "Percakapan dipindahkan ke Sampah.", { isDeleted: false }),
+  snooze: (ids) => moveOut(ids, { folder: "snoozed" }, "Percakapan ditunda.", { folder: "inbox" }),
+  spam: (ids) => moveOut(ids, { folder: "spam" }, "Ditandai sebagai spam.", { folder: "inbox" }),
+  unread: (ids) => moveOut(ids, { isUnread: true }, "Ditandai belum dibaca."),
+  read: (ids) => moveOut(ids, { isUnread: false }, "Ditandai sudah dibaca."),
 };
 
 rowsEl.addEventListener("click", async (e) => {
@@ -481,7 +576,7 @@ rowsEl.addEventListener("click", async (e) => {
       syncSelAll();
       renderRows();
     } else {
-      ACTIONS[act]?.(id);
+      ACTIONS[act]?.([id]);
     }
     return;
   }
@@ -496,10 +591,26 @@ rowsEl.addEventListener("keydown", (e) => {
 });
 
 function syncSelAll() {
-  const all = mails.length && mails.every((m) => selected.has(m.id));
-  const some = mails.some((m) => selected.has(m.id));
-  $("#selAllIcon").textContent = all ? "check_box" : (some ? "indeterminate_check_box" : "check_box_outline_blank");
+  const sel = mails.filter((m) => selected.has(m.id));
+  const all = mails.length && sel.length === mails.length;
+  $("#selAllIcon").textContent = all ? "check_box" : (sel.length ? "indeterminate_check_box" : "check_box_outline_blank");
+  // Gmail swaps refresh for actions on the selection.
+  $("#bulkTools").hidden = !sel.length;
+  $("#btn-refresh").hidden = !!sel.length;
+  const show = {
+    archive: canManage() && sel.some((m) => m.inInbox),
+    inbox: canManage() && sel.some((m) => !m.inInbox && movable(m)),
+    delete: canManage(),
+    read: sel.some((m) => m.isUnread),
+    unread: !sel.some((m) => m.isUnread),
+  };
+  document.querySelectorAll("[data-bulk]").forEach((b) => { b.hidden = !show[b.dataset.bulk]; });
 }
+
+$("#bulkTools").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-bulk]");
+  if (b) ACTIONS[b.dataset.bulk](mails.filter((m) => selected.has(m.id)).map((m) => m.id));
+});
 
 $(".sel-all").addEventListener("click", () => {
   const all = mails.length && mails.every((m) => selected.has(m.id));
@@ -515,23 +626,10 @@ $("#readerBack").addEventListener("click", () => {
   apiGetEmails();
 });
 
-$("#btnRArchive").onclick = () => openId && ACTIONS.archive(openId);
-$("#btnRSpam").onclick = () => openId && ACTIONS.spam(openId);
-$("#btnRSnooze").onclick = () => openId && ACTIONS.snooze(openId);
-$("#btnRUnread").onclick = () => openId && ACTIONS.unread(openId);
-$("#btnRDelete").onclick = async () => {
-  if (!openId) return;
-  if (view === "trash") {
-    if (!confirm("Hapus permanen email ini?")) return;
-    await apiDeleteEmail(openId);
-    showSnackbar("Email dihapus permanen.");
-    openId = null;
-    renderReader();
-    apiGetEmails();
-  } else {
-    ACTIONS.delete(openId);
-  }
-};
+for (const [id, act] of [["#btnRArchive", "archive"], ["#btnRInbox", "inbox"], ["#btnRSpam", "spam"],
+  ["#btnRSnooze", "snooze"], ["#btnRUnread", "unread"], ["#btnRDelete", "delete"]]) {
+  $(id).onclick = () => openId && ACTIONS[act]([openId]);
+}
 
 let searchTimer = null;
 $("#searchInput").addEventListener("input", (e) => {
@@ -564,7 +662,9 @@ $("#logoutBtn").addEventListener("click", async () => {
 
 /* ---------- Compose & Attachments ---------- */
 
-function openCompose() {
+// openCompose shows the composer as Gmail's floating window, or inline under the
+// open conversation for replies and forwards.
+function openCompose(inline = false) {
   const list = sendable();
   if (!list.length) return;
   const cur = currentMailbox();
@@ -573,9 +673,18 @@ function openCompose() {
     `<option value="${m.id}" ${m.id === from ? "selected" : ""}>${esc(m.displayName ? `${m.displayName} <${m.address}>` : m.address)}</option>`
   ).join("");
   const comp = $("#compose");
+  comp.classList.toggle("is-inline", inline);
+  comp.classList.remove("is-min", "is-full");
+  comp.dataset.for = inline ? String(openId) : "";
+  comp.setAttribute("aria-label", inline ? "Balas" : "Pesan baru");
+  (inline ? $("#readerBody") : document.body).appendChild(comp);
   comp.hidden = false;
-  comp.classList.remove("is-min");
   $("#composeTo").focus();
+}
+
+function closeCompose() {
+  $("#compose").hidden = true;
+  resetCompose();
 }
 
 function resetCompose() {
@@ -585,6 +694,8 @@ function resetCompose() {
   $("#composeSubject").value = "";
   $("#composeBody").value = "";
   $("#composeInReplyTo").value = "";
+  setQuote("", false);
+  $("#btnQuote").hidden = true;
   pendingAttachments = [];
   renderComposeAttachments();
 }
@@ -614,7 +725,13 @@ function renderComposeAttachments() {
 }
 
 $("#composeBtn").addEventListener("click", () => { resetCompose(); openCompose(); });
-$("#composeClose").addEventListener("click", () => { $("#compose").hidden = true; });
+$("#composeClose").addEventListener("click", closeCompose);
+$("#composeDiscard").addEventListener("click", closeCompose);
+$("#btnQuote").addEventListener("click", () => {
+  const q = $("#composeQuote");
+  q.hidden = !q.hidden;
+  $("#btnQuote").setAttribute("aria-expanded", String(!q.hidden));
+});
 $("#composeMin").addEventListener("click", () => $("#compose").classList.toggle("is-min"));
 $("#composeFull").addEventListener("click", () => $("#compose").classList.toggle("is-full"));
 $("#btnCcToggle").addEventListener("click", () => {
@@ -645,7 +762,7 @@ sendBtn.addEventListener("click", async () => {
   fd.append("to", to);
   fd.append("cc", $("#composeCc").value.trim());
   fd.append("subject", $("#composeSubject").value.trim());
-  fd.append("body", $("#composeBody").value.trim());
+  fd.append("body", [$("#composeBody").value.trim(), $("#composeQuote").value.trim()].filter(Boolean).join("\n\n"));
   fd.append("inReplyTo", $("#composeInReplyTo").value.trim());
   for (const file of pendingAttachments) fd.append("attachments", file);
 
@@ -655,19 +772,13 @@ sendBtn.addEventListener("click", async () => {
     const res = await api("/api/emails/send", { method: "POST", body: fd });
     if (!res.ok) throw new Error((await res.text()) || "Gagal mengirim email");
 
-    $("#compose").hidden = true;
-    resetCompose();
+    // Like Gmail, stay put: a reply shows up at the bottom of its conversation.
+    const inline = $("#compose").classList.contains("is-inline");
+    closeCompose();
     showSnackbar("Pesan terkirim.");
-    const fromId = Number(fd.get("from"));
-    if (fromId !== mailboxId) {
-      $("#mailboxSelect").value = String(fromId);
-      switchMailbox(fromId);
-    }
-    view = "sent";
-    openId = null;
-    renderNav();
     apiGetStats();
-    apiGetEmails();
+    if (inline && openId) apiGetEmailDetail(openId);
+    else apiGetEmails();
   } catch (err) {
     alert(err.message);
   } finally {

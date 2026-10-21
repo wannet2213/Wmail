@@ -155,3 +155,70 @@ func TestLegacyTimestampsRepaired(t *testing.T) {
 		t.Fatalf("inbound created_at = %v, want %v", got["inbound"], dateHeader.UTC())
 	}
 }
+
+func TestConversations(t *testing.T) {
+	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	mb, _ := d.CreateMailbox("info@contoh.com", "")
+	at := func(h int) time.Time { return time.Date(2026, 10, 20, h, 0, 0, 0, time.UTC) }
+	save := func(m models.Email) int64 {
+		t.Helper()
+		m.MailboxID = mb
+		if err := d.SaveEmail(&m); err != nil {
+			t.Fatal(err)
+		}
+		return m.ID
+	}
+	first := save(models.Email{MessageID: "<a@luar>", FromEmail: "budi@luar", ToRecipients: []string{"info@contoh.com"}, Subject: "Rapat", Folder: "inbox", IsUnread: true, CreatedAt: at(1)})
+	save(models.Email{MessageID: "<r@resend>", InReplyTo: "<a@luar>", FromEmail: "info@contoh.com", ToRecipients: []string{"budi@luar"}, Subject: "Re: Rapat", Folder: "sent", CreatedAt: at(2)})
+	// Resend rewrote our Message-ID, so Budi's answer only matches on subject and sender.
+	last := save(models.Email{MessageID: "<b@luar>", InReplyTo: "<x@amazonses>", FromEmail: "Budi@luar", ToRecipients: []string{"info@contoh.com"}, Subject: "RE: Re: Rapat", Folder: "inbox", IsUnread: true, CreatedAt: at(3)})
+	other := save(models.Email{MessageID: "<c@luar>", FromEmail: "citra@luar", Subject: "Re: Rapat", Folder: "inbox", IsUnread: true, CreatedAt: at(4)})
+
+	list, total, err := d.ListEmails(mb, "inbox", "", 50, 0)
+	if err != nil || total != 2 || len(list) != 2 {
+		t.Fatalf("inbox = %d rows (total %d), want 2 conversations: %v", len(list), total, err)
+	}
+	if list[1].ID != last || list[1].ThreadCount != 3 || !list[1].InInbox {
+		t.Fatalf("conversation row = %+v, want newest message %d with 3 messages", list[1], last)
+	}
+	if s, _ := d.GetStats(mb); s.InboxUnread != 2 {
+		t.Fatalf("unread conversations = %d, want 2", s.InboxUnread)
+	}
+
+	archived := true
+	if err := d.UpdateEmailStatus(first, models.UpdateStatusRequest{IsArchived: &archived}); err != nil {
+		t.Fatal(err)
+	}
+	if list, _, _ = d.ListEmails(mb, "inbox", "", 50, 0); len(list) != 1 || list[0].ID != other {
+		t.Fatalf("after archiving, inbox = %+v, want only %d", list, other)
+	}
+	if list, _, _ = d.ListEmails(mb, "all", "", 50, 0); len(list) != 2 || list[1].InInbox {
+		t.Fatalf("archived conversation should stay in Semua email, outside the inbox: %+v", list)
+	}
+	spam := "spam"
+	if err := d.UpdateEmailStatus(last, models.UpdateStatusRequest{Folder: &spam}); err != nil {
+		t.Fatal(err)
+	}
+	if list, _, _ = d.ListEmails(mb, "sent", "", 50, 0); len(list) != 1 {
+		t.Fatalf("moving a conversation must leave its sent copy in Terkirim: %+v", list)
+	}
+
+	m, _ := d.GetEmail(last)
+	thread, err := d.Thread(m)
+	if err != nil || len(thread) != 3 || thread[0].ID != first || thread[2].ID != last {
+		t.Fatalf("thread = %+v, %v", thread, err)
+	}
+
+	deleted := true
+	_ = d.UpdateEmailStatus(first, models.UpdateStatusRequest{IsDeleted: &deleted})
+	if err := d.DeleteEmail(first); err != nil {
+		t.Fatal(err)
+	}
+	if list, _, _ = d.ListEmails(mb, "all", "", 50, 0); len(list) != 1 || list[0].ID != other {
+		t.Fatalf("permanent delete should remove the whole conversation: %+v", list)
+	}
+}

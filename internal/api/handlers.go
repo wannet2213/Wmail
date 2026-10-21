@@ -113,12 +113,24 @@ func (a *API) GetEmail(w http.ResponseWriter, r *http.Request, u *models.User) {
 	if !ok {
 		return
 	}
-	if email.IsUnread {
-		read := false
-		_ = a.db.UpdateEmailStatus(email.ID, models.UpdateStatusRequest{IsUnread: &read})
-		email.IsUnread = false
+	// Loaded before marking read: the client opens the messages that were still unread.
+	thread, err := a.db.Thread(email)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, http.StatusOK, email)
+	for _, m := range thread {
+		if m.IsUnread {
+			read := false
+			_ = a.db.UpdateEmailStatus(email.ID, models.UpdateStatusRequest{IsUnread: &read})
+			break
+		}
+	}
+	email.IsUnread = false
+	writeJSON(w, http.StatusOK, struct {
+		*models.Email
+		Thread []models.Email `json:"thread"`
+	}{email, thread})
 }
 
 func (a *API) UpdateEmail(w http.ResponseWriter, r *http.Request, u *models.User) {
@@ -223,7 +235,8 @@ func (a *API) SendEmail(w http.ResponseWriter, r *http.Request, u *models.User) 
 	if subject == "" {
 		subject = "(no subject)"
 	}
-	body := strings.TrimSpace(req.Body)
+	body := strings.ReplaceAll(strings.TrimSpace(req.Body), "\r\n", "\n") // multipart forms send CRLF
+
 	inReplyTo := service.CleanMsgID(req.InReplyTo)
 	html := renderHTMLBody(body)
 

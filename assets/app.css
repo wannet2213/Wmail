@@ -53,7 +53,7 @@ img { display: block; }
 .iconbtn:hover { background: rgba(68, 71, 70, .08); }
 .iconbtn[disabled] { opacity: .38; cursor: default; }
 .iconbtn[disabled]:hover { background: none; }
-.iconbtn .ms { font-size: 20px; }
+.iconbtn :is(.ms, .msf) { font-size: 20px; }
 
 .avatar {
   width: 32px; height: 32px;
@@ -229,7 +229,8 @@ img { display: block; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   display: flex; align-items: center; gap: 2px;
 }
-.row-sender .count { color: var(--text-2); font-size: 12px; }
+.row-sender .count { color: var(--text-2); font-size: 12px; margin-left: 4px; font-weight: 400; }
+.row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mailrow.is-unread .row-sender { font-weight: 700; color: var(--text); }
 .mailrow:not(.is-unread) .row-sender { color: var(--text-2); }
 
@@ -276,7 +277,7 @@ img { display: block; }
 .mailrow:hover .row-actions { display: flex; }
 .mailrow.is-selected:hover .row-actions { background: #B5D2FF; }
 .row-actions .iconbtn { width: 36px; height: 36px; }
-.row-actions .iconbtn .ms { font-size: 18px; }
+.row-actions .iconbtn :is(.ms, .msf) { font-size: 18px; }
 
 .empty-state {
   padding: 48px;
@@ -317,6 +318,15 @@ img { display: block; }
 .reader-from .addr { font-weight: 400; color: var(--text-3); font-size: 12px; margin-left: 4px; }
 .reader-meta { font-size: 12px; color: var(--text-3); }
 .reader-msg-actions { display: flex; gap: 2px; color: var(--text-3); }
+.star-on { color: var(--star); }
+
+/* conversation: one block per message, older ones folded to a line */
+.msg { padding-bottom: 12px; }
+.msg + .msg { border-top: 1px solid var(--line); }
+.msg [data-toggle] { cursor: pointer; }
+.msg.is-folded .reader-msg-head { padding: 4px 0; }
+.msg.is-folded .reader-from { color: var(--text-2); }
+.msg-snippet { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .reader-content {
   font-family: var(--font-body);
   color: var(--text);
@@ -421,6 +431,35 @@ img { display: block; }
 .send-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .send-btn .msf { font-size: 18px; }
 .compose-foot-end { margin-left: auto; display: flex; }
+.compose-quote { flex: none; min-height: 160px; color: var(--text-2); }
+.quote-toggle {
+  align-self: flex-start;
+  margin: 0 16px 8px;
+  height: 16px; padding: 0 4px;
+  border-radius: 8px;
+  background: #E8EAED; color: var(--icon);
+  display: inline-flex; align-items: center;
+}
+.quote-toggle:hover { background: #DADCE0; }
+.quote-toggle span { font-size: 10px; letter-spacing: 1px; }
+.compose-mode { display: none; font-size: 20px; color: var(--icon); margin-right: 8px; }
+
+/* reply box inline under the conversation, as in Gmail */
+.compose.is-inline {
+  position: static;
+  width: auto; height: auto; max-width: 860px;
+  margin: 16px 0 24px 44px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-1);
+}
+.compose.is-inline .compose-head,
+.compose.is-inline .compose-from,
+.compose.is-inline .compose-subject { display: none; }
+.compose.is-inline .compose-mode { display: inline-block; }
+.compose.is-inline .compose-body { flex: none; min-height: 140px; }
+.compose.is-inline .compose-quote { min-height: 200px; }
+.reader-body:has(> .compose.is-inline:not([hidden])) .reader-quick { display: none; }
 
 /* reader attachments */
 .reader-attachments-section {
@@ -775,6 +814,7 @@ body.page { overflow: auto; }
   .row-right { width: auto; }
   .row-date { display: none; }
   .compose { right: 0; width: 100%; border-radius: 0; }
+  .compose.is-inline { margin-left: 0; }
 }
 
 

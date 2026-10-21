@@ -26,6 +26,8 @@ type Email struct {
 	Label          string       `json:"label,omitempty"`    // Work, Finance, Travel
 	HasAttachments bool         `json:"hasAttachments"`
 	Attachments    []Attachment `json:"attachments,omitempty"`
+	ThreadCount    int          `json:"threadCount,omitempty"` // list rows only: messages in the conversation
+	InInbox        bool         `json:"inInbox,omitempty"`     // list rows only: conversation shows in Kotak masuk
 	CreatedAt      time.Time    `json:"createdAt"`
 	UpdatedAt      time.Time    `json:"updatedAt"`
 }
