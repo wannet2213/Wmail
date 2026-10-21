@@ -885,8 +885,18 @@ func NormalizeAddress(addr string) string {
 	return strings.ToLower(strings.TrimSpace(addr))
 }
 
+// FullAddress normalizes addr and gives a bare name ("sales") the configured domain,
+// so nobody has to type "@domain" when adding or granting a mailbox.
+func (d *DB) FullAddress(addr string) string {
+	addr = NormalizeAddress(addr)
+	if dom := NormalizeAddress(d.GetSetting("domain")); addr != "" && dom != "" && !strings.Contains(addr, "@") {
+		addr += "@" + dom
+	}
+	return addr
+}
+
 func (d *DB) CreateMailbox(address, displayName string) (int64, error) {
-	address = NormalizeAddress(address)
+	address = d.FullAddress(address)
 	if at := strings.IndexByte(address, '@'); at < 1 || at == len(address)-1 || strings.ContainsAny(address, " <>,;") {
 		return 0, fmt.Errorf("%w: alamat email tidak valid", ErrInvalidInput)
 	}
@@ -912,7 +922,7 @@ func (d *DB) DeleteMailbox(id int64) error {
 
 func (d *DB) MailboxByAddress(address string) (*models.Mailbox, error) {
 	var m models.Mailbox
-	err := d.conn.QueryRow("SELECT id, address, display_name FROM mailboxes WHERE address = ?", NormalizeAddress(address)).Scan(&m.ID, &m.Address, &m.DisplayName)
+	err := d.conn.QueryRow("SELECT id, address, display_name FROM mailboxes WHERE address = ?", d.FullAddress(address)).Scan(&m.ID, &m.Address, &m.DisplayName)
 	if err != nil {
 		return nil, err
 	}

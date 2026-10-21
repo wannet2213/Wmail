@@ -34,12 +34,11 @@
   </section>
 
   <section id="secUsers" hidden>
-    <h2>Pengguna</h2>
-    <p class="muted">Admin bisa membuka semua mailbox. User biasa hanya mailbox yang diberikan di bagian Akses.</p>
-    <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Username</th><th>Peran</th><th></th></tr></thead>
-      <tbody id="usersBody"></tbody>
-    </table></div>
+    <h2>Pengguna &amp; akses</h2>
+    <p class="muted">Admin bisa membuka semua mailbox. Buka user biasa untuk mengatur mailbox yang boleh ia buka: terima saja (baca) atau kirim &amp; terima.</p>
+    <input class="settings-input list-filter" id="userFilter" type="search" placeholder="Cari user" aria-label="Cari user">
+    <div class="scroll-list" id="usersList"></div>
+    <datalist id="mbOptions"></datalist>
     <form class="inline-form" id="userForm">
       <div class="settings-field"><label for="newUsername">Username</label>
         <input class="settings-input" id="newUsername" autocomplete="off" required></div>
@@ -53,24 +52,21 @@
   <section id="secMailboxes" hidden>
     <h2>Mailbox</h2>
     <p class="muted">Hanya alamat yang terdaftar di sini yang menerima email; alamat lain ditolak.</p>
-    <div class="table-wrap"><table class="data-table">
+    <input class="settings-input list-filter" id="mbFilter" type="search" placeholder="Cari alamat" aria-label="Cari mailbox">
+    <div class="table-wrap scroll-list"><table class="data-table">
       <thead><tr><th>Alamat</th><th>Nama pengirim</th><th></th></tr></thead>
       <tbody id="mbBody"></tbody>
     </table></div>
     <form class="inline-form" id="mbForm">
       <div class="settings-field"><label for="newAddress">Alamat</label>
-        <input class="settings-input" id="newAddress" type="email" placeholder="nama@domain-anda.com" required></div>
+        <div class="settings-input-group">
+          <input class="settings-input" id="newAddress" placeholder="nama@domain-anda.com" autocomplete="off" required>
+          <span class="input-suffix" id="newDomain" hidden></span>
+        </div></div>
       <div class="settings-field"><label for="newDisplay">Nama pengirim</label>
         <input class="settings-input" id="newDisplay" placeholder="Nama yang tampil di penerima"></div>
       <button class="send-btn" type="submit">Tambah</button>
     </form>
-  </section>
-
-  <section id="secAccess" hidden>
-    <h2>Akses</h2>
-    <p class="muted">Mailbox yang boleh dibuka tiap user: terima saja (baca) atau kirim &amp; terima. Admin otomatis bisa membuka semua.</p>
-    <div id="accessList"></div>
-    <datalist id="mbOptions"></datalist>
   </section>
 
   <section id="secProvider" hidden>

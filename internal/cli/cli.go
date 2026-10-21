@@ -242,8 +242,9 @@ func (c *ctx) mailbox(args []string) error {
 		if _, err := c.db.CreateMailbox(args[1], name); err != nil {
 			return err
 		}
-		fmt.Printf("✓ Mailbox %s dibuat\n", db.NormalizeAddress(args[1]))
-		if d := c.db.GetSetting("domain"); d != "" && !strings.HasSuffix(db.NormalizeAddress(args[1]), "@"+d) {
+		addr := c.db.FullAddress(args[1])
+		fmt.Printf("✓ Mailbox %s dibuat\n", addr)
+		if d := c.db.GetSetting("domain"); d != "" && !strings.HasSuffix(addr, "@"+d) {
 			fmt.Printf("  Catatan: domain alamat ini bukan %s; pastikan domainnya juga diarahkan ke Worker.\n", d)
 		}
 		return nil

@@ -36,6 +36,8 @@ async function run(fn, okMsg) {
 }
 
 let me = null;
+let domain = ""; // the mail domain; bare names typed in address fields get "@" + domain
+const fullAddress = (s) => (s.includes("@") || !domain ? s : `${s}@${domain}`);
 let data = { users: [], mailboxes: [], grants: [] };
 
 /* ---------- my account ---------- */
@@ -55,23 +57,96 @@ $("#logoutBtn").addEventListener("click", async () => {
   location.href = "/login.html";
 });
 
-/* ---------- admin: users ---------- */
+/* ---------- admin: users and their access ---------- */
 
-function renderUsers() {
-  $("#usersBody").innerHTML = data.users.map((u) => `
-    <tr>
-      <td>${esc(u.username)}${u.id === me.user.id ? ' <span class="muted">(Anda)</span>' : ""}</td>
-      <td>${u.isAdmin ? "Admin" : "User"}</td>
-      <td><div class="row-btns">
-        <button class="text-btn" data-act="user-pw" data-id="${u.id}">Reset password</button>
-        ${u.id === me.user.id ? "" : `
-          <button class="text-btn" data-act="user-role" data-id="${u.id}">${u.isAdmin ? "Jadikan user" : "Jadikan admin"}</button>
-          <button class="text-btn danger" data-act="user-del" data-id="${u.id}">Hapus</button>`}
-      </div></td>
-    </tr>`).join("");
+const lc = (s) => String(s || "").toLowerCase();
+
+// filterList hides the items of a long list that don't contain what was typed.
+function filterList(input, items) {
+  const q = lc(input.value.trim());
+  for (const it of items) it.hidden = !!q && !it.dataset.filter.includes(q);
 }
 
-$("#usersBody").addEventListener("click", (e) => {
+// accessHtml lists only the mailboxes u holds, and new ones are picked by typing the
+// address, so it stays short however many mailboxes the domain has.
+function accessHtml(u, held) {
+  if (!data.mailboxes.length) return `<p class="muted">Belum ada mailbox.</p>`;
+  return `${held.length ? `<div class="table-wrap"><table class="data-table"><tbody>${held.map((g) => `<tr>
+      <td>${esc(g.address)}</td>
+      <td><select class="settings-input" data-user="${u.id}" data-mailbox="${g.mailboxId}" aria-label="Akses ${esc(u.username)} ke ${esc(g.address)}">
+        <option value="receive" ${g.canSend ? "" : "selected"}>Terima saja</option>
+        <option value="send" ${g.canSend ? "selected" : ""}>Kirim &amp; terima</option>
+      </select></td>
+      <td><div class="row-btns"><button class="text-btn danger" data-revoke data-user="${u.id}" data-mailbox="${g.mailboxId}">Cabut</button></div></td>
+    </tr>`).join("")}</tbody></table></div>` : `<p class="muted">Belum punya akses ke mailbox mana pun.</p>`}
+    <form class="inline-form" data-grant="${u.id}">
+      <div class="settings-field"><label for="grantAddr${u.id}">Tambah mailbox</label>
+        <input class="settings-input" id="grantAddr${u.id}" name="address" list="mbOptions" placeholder="Ketik alamat…" autocomplete="off" required></div>
+      <div class="settings-field"><label for="grantAccess${u.id}">Hak</label>
+        <select class="settings-input" id="grantAccess${u.id}" name="access">
+          <option value="receive">Terima saja</option>
+          <option value="send">Kirim &amp; terima</option>
+        </select></div>
+      <button class="send-btn" type="submit">Beri akses</button>
+    </form>`;
+}
+
+// One folded line per user; opening it shows their access and account actions.
+function renderUsers() {
+  const el = $("#usersList");
+  const open = new Set([...el.querySelectorAll("details[open]")].map((d) => d.dataset.user));
+  const byId = new Map(data.mailboxes.map((m) => [m.id, m]));
+  $("#mbOptions").innerHTML = data.mailboxes.map((m) => `<option value="${esc(m.address)}">`).join("");
+  el.innerHTML = data.users.map((u) => {
+    const held = data.grants.filter((g) => g.userId === u.id && byId.has(g.mailboxId))
+      .map((g) => ({ ...g, address: byId.get(g.mailboxId).address }))
+      .sort((a, b) => a.address.localeCompare(b.address));
+    const self = u.id === me.user.id;
+    return `<details class="user-item" data-user="${u.id}" data-filter="${esc(lc(u.username))}" ${open.has(String(u.id)) ? "open" : ""}>
+      <summary><strong>${esc(u.username)}</strong>${self ? ' <span class="muted">(Anda)</span>' : ""}
+        <span class="muted">· ${u.isAdmin ? "Admin, semua mailbox" : `User, ${held.length} mailbox`}</span></summary>
+      <div class="user-body">
+        ${u.isAdmin ? `<p class="muted">Admin bisa membuka semua mailbox.</p>` : accessHtml(u, held)}
+        <div class="row-btns">
+          <button class="text-btn" data-act="user-pw" data-id="${u.id}">Reset password</button>
+          ${self ? "" : `
+            <button class="text-btn" data-act="user-role" data-id="${u.id}">${u.isAdmin ? "Jadikan user" : "Jadikan admin"}</button>
+            <button class="text-btn danger" data-act="user-del" data-id="${u.id}">Hapus user</button>`}
+        </div>
+      </div>
+    </details>`;
+  }).join("");
+  filterList($("#userFilter"), el.children);
+}
+
+$("#userFilter").addEventListener("input", () => filterList($("#userFilter"), $("#usersList").children));
+
+function setGrant(userId, mailboxId, access, okMsg) {
+  return run(async () => {
+    await api("/api/admin/grants", "PUT", { userId: Number(userId), mailboxId: Number(mailboxId), access });
+    data = await api("/api/admin/overview");
+    renderUsers();
+  }, okMsg);
+}
+
+$("#usersList").addEventListener("change", (e) => {
+  const s = e.target.closest("select[data-mailbox]");
+  if (s) setGrant(s.dataset.user, s.dataset.mailbox, s.value, "Akses disimpan.");
+});
+
+$("#usersList").addEventListener("submit", (e) => {
+  const f = e.target.closest("form[data-grant]");
+  if (!f) return;
+  e.preventDefault();
+  const address = fullAddress(lc(f.address.value.trim()));
+  const m = data.mailboxes.find((x) => lc(x.address) === address);
+  if (!m) return toast("Mailbox tidak ditemukan. Pilih dari daftar alamat.");
+  setGrant(f.dataset.grant, m.id, f.access.value, "Akses diberikan.");
+});
+
+$("#usersList").addEventListener("click", (e) => {
+  const r = e.target.closest("[data-revoke]");
+  if (r) return setGrant(r.dataset.user, r.dataset.mailbox, "none", "Akses dicabut.");
   const b = e.target.closest("[data-act]");
   if (!b) return;
   const u = data.users.find((x) => x.id === Number(b.dataset.id));
@@ -102,7 +177,7 @@ $("#userForm").addEventListener("submit", (e) => {
 
 function renderMailboxes() {
   $("#mbBody").innerHTML = data.mailboxes.length ? data.mailboxes.map((m) => `
-    <tr>
+    <tr data-filter="${esc(lc(m.address + " " + m.displayName))}">
       <td>${esc(m.address)}</td>
       <td><input class="settings-input" data-name-for="${m.id}" value="${esc(m.displayName)}" aria-label="Nama pengirim ${esc(m.address)}"></td>
       <td><div class="row-btns">
@@ -110,8 +185,11 @@ function renderMailboxes() {
         <button class="text-btn danger" data-act="mb-del" data-id="${m.id}">Hapus</button>
       </div></td>
     </tr>`).join("")
-    : `<tr><td colspan="3" class="muted">Belum ada mailbox. Tambahkan alamat pertama di bawah.</td></tr>`;
+    : `<tr data-filter=""><td colspan="3" class="muted">Belum ada mailbox. Tambahkan alamat pertama di bawah.</td></tr>`;
+  filterList($("#mbFilter"), $("#mbBody").children);
 }
+
+$("#mbFilter").addEventListener("input", () => filterList($("#mbFilter"), $("#mbBody").children));
 
 $("#mbBody").addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]");
@@ -125,84 +203,20 @@ $("#mbBody").addEventListener("click", (e) => {
   }
 });
 
+// The "@domain" suffix shows while a bare name is typed; a full address hides it.
+function syncDomainSuffix() {
+  $("#newDomain").hidden = !domain || $("#newAddress").value.includes("@");
+}
+$("#newAddress").addEventListener("input", syncDomainSuffix);
+
 $("#mbForm").addEventListener("submit", (e) => {
   e.preventDefault();
   run(async () => {
     await api("/api/admin/mailboxes", "POST", { address: $("#newAddress").value, displayName: $("#newDisplay").value });
     e.target.reset();
+    syncDomainSuffix();
     await loadAdmin();
   }, "Mailbox dibuat.");
-});
-
-/* ---------- admin: access, one block per user ---------- */
-
-// Each user lists only the mailboxes they hold, and new ones are picked by typing
-// the address, so the page stays readable however many mailboxes the domain has.
-function renderAccess() {
-  const users = data.users.filter((u) => !u.isAdmin);
-  const el = $("#accessList");
-  if (!users.length || !data.mailboxes.length) {
-    el.innerHTML = `<p class="muted">${!users.length
-      ? "Belum ada user non-admin. Admin otomatis punya akses ke semua mailbox."
-      : "Belum ada mailbox."}</p>`;
-    return;
-  }
-  const byId = new Map(data.mailboxes.map((m) => [m.id, m]));
-  $("#mbOptions").innerHTML = data.mailboxes.map((m) => `<option value="${esc(m.address)}">`).join("");
-  el.innerHTML = users.map((u) => {
-    const held = data.grants.filter((g) => g.userId === u.id && byId.has(g.mailboxId))
-      .map((g) => ({ ...g, address: byId.get(g.mailboxId).address }))
-      .sort((a, b) => a.address.localeCompare(b.address));
-    return `<div class="access-user">
-      <h3>${esc(u.username)} <span class="muted">· ${held.length} mailbox</span></h3>
-      ${held.length ? `<div class="table-wrap"><table class="data-table"><tbody>${held.map((g) => `<tr>
-        <td>${esc(g.address)}</td>
-        <td><select class="settings-input" data-user="${u.id}" data-mailbox="${g.mailboxId}" aria-label="Akses ${esc(u.username)} ke ${esc(g.address)}">
-          <option value="receive" ${g.canSend ? "" : "selected"}>Terima saja</option>
-          <option value="send" ${g.canSend ? "selected" : ""}>Kirim &amp; terima</option>
-        </select></td>
-        <td><div class="row-btns"><button class="text-btn danger" data-revoke data-user="${u.id}" data-mailbox="${g.mailboxId}">Cabut</button></div></td>
-      </tr>`).join("")}</tbody></table></div>` : `<p class="muted">Belum punya akses ke mailbox mana pun.</p>`}
-      <form class="inline-form" data-grant="${u.id}">
-        <div class="settings-field"><label for="grantAddr${u.id}">Tambah mailbox</label>
-          <input class="settings-input" id="grantAddr${u.id}" name="address" list="mbOptions" placeholder="Ketik alamat…" autocomplete="off" required></div>
-        <div class="settings-field"><label for="grantAccess${u.id}">Hak</label>
-          <select class="settings-input" id="grantAccess${u.id}" name="access">
-            <option value="receive">Terima saja</option>
-            <option value="send">Kirim &amp; terima</option>
-          </select></div>
-        <button class="send-btn" type="submit">Beri akses</button>
-      </form>
-    </div>`;
-  }).join("");
-}
-
-function setGrant(userId, mailboxId, access, okMsg) {
-  return run(async () => {
-    await api("/api/admin/grants", "PUT", { userId: Number(userId), mailboxId: Number(mailboxId), access });
-    data = await api("/api/admin/overview");
-    renderAccess();
-  }, okMsg);
-}
-
-$("#accessList").addEventListener("change", (e) => {
-  const s = e.target.closest("select[data-mailbox]");
-  if (s) setGrant(s.dataset.user, s.dataset.mailbox, s.value, "Akses disimpan.");
-});
-
-$("#accessList").addEventListener("click", (e) => {
-  const b = e.target.closest("[data-revoke]");
-  if (b) setGrant(b.dataset.user, b.dataset.mailbox, "none", "Akses dicabut.");
-});
-
-$("#accessList").addEventListener("submit", (e) => {
-  const f = e.target.closest("form[data-grant]");
-  if (!f) return;
-  e.preventDefault();
-  const address = f.address.value.trim().toLowerCase();
-  const m = data.mailboxes.find((x) => x.address.toLowerCase() === address);
-  if (!m) return toast("Mailbox tidak ditemukan. Pilih dari daftar alamat.");
-  setGrant(f.dataset.grant, m.id, f.access.value, "Akses diberikan.");
 });
 
 /* ---------- admin: providers & Cloudflare info ---------- */
@@ -211,6 +225,10 @@ const PROVIDER_KEYS = ["active_provider", "resend_api_key", "resend_daily_limit"
 
 async function loadSettings() {
   const s = await api("/api/admin/settings");
+  domain = lc(s.domain);
+  $("#newDomain").textContent = `@${domain}`;
+  $("#newAddress").placeholder = domain ? "nama" : "nama@domain-anda.com";
+  syncDomainSuffix();
   for (const k of PROVIDER_KEYS) $("#" + k).value = s[k] || (k === "active_provider" ? "auto" : "");
   const info = [
     ["Domain", s.domain], ["URL publik", s.public_url], ["Account", s.cf_account_id],
@@ -231,14 +249,13 @@ async function loadAdmin() {
   data = await api("/api/admin/overview");
   renderUsers();
   renderMailboxes();
-  renderAccess();
 }
 
 async function boot() {
   me = await api("/api/me");
   $("#whoami").textContent = `Masuk sebagai ${me.user.username}${me.user.isAdmin ? " (admin)" : ""}.`;
   if (!me.user.isAdmin) return;
-  for (const id of ["#secUsers", "#secMailboxes", "#secAccess", "#secProvider", "#secCloudflare"]) $(id).hidden = false;
+  for (const id of ["#secUsers", "#secMailboxes", "#secProvider", "#secCloudflare"]) $(id).hidden = false;
   await Promise.all([loadAdmin(), loadSettings()]);
 }
 

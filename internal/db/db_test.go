@@ -228,3 +228,25 @@ func TestConversations(t *testing.T) {
 		t.Fatalf("permanent delete should remove the whole conversation: %+v", list)
 	}
 }
+
+func TestBareMailboxNameGetsDomain(t *testing.T) {
+	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	_ = d.SetSetting("domain", "Contoh.com")
+	id, err := d.CreateMailbox(" Sales ", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mb, err := d.MailboxByAddress("sales"); err != nil || mb.ID != id || mb.Address != "sales@contoh.com" {
+		t.Fatalf("bare name: %+v, %v", mb, err)
+	}
+	if _, err := d.CreateMailbox("info@lain.org", ""); err != nil {
+		t.Fatalf("a full address on another domain must stay as typed: %v", err)
+	}
+	if _, err := d.MailboxByAddress("info@lain.org"); err != nil {
+		t.Fatal(err)
+	}
+}
