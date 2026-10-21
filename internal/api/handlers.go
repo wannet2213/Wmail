@@ -369,11 +369,44 @@ func parseAddresses(input string) ([]string, error) {
 	return res, nil
 }
 
+var escapeHTML = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace
+
+// renderHTMLBody turns plain text into HTML the way Gmail sends it: runs of "> " lines
+// become (nested) blockquotes instead of showing the ">" marks, and the "X menulis:"
+// line just above a quote joins it in a gmail_quote div, which readers fold away.
 func renderHTMLBody(body string) string {
-	escaped := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(body)
-	var parts []string
-	for _, p := range strings.Split(escaped, "\n\n") {
-		parts = append(parts, "<p>"+strings.ReplaceAll(p, "\n", "<br>")+"</p>")
+	var out strings.Builder
+	var para []string
+	flush := func() {
+		if len(para) > 0 {
+			out.WriteString("<p>" + strings.Join(para, "<br>") + "</p>")
+			para = nil
+		}
 	}
-	return strings.Join(parts, "")
+	lines := strings.Split(body, "\n")
+	for i := 0; i < len(lines); {
+		if !strings.HasPrefix(lines[i], ">") {
+			if strings.TrimSpace(lines[i]) == "" {
+				flush()
+			} else {
+				para = append(para, escapeHTML(lines[i]))
+			}
+			i++
+			continue
+		}
+		var quoted []string
+		for ; i < len(lines) && strings.HasPrefix(lines[i], ">"); i++ {
+			quoted = append(quoted, strings.TrimPrefix(lines[i][1:], " "))
+		}
+		attr := ""
+		if n := len(para); n > 0 && strings.HasSuffix(para[n-1], ":") {
+			attr, para = `<div class="gmail_attr">`+para[n-1]+`</div>`, para[:n-1]
+		}
+		flush()
+		out.WriteString(`<div class="gmail_quote">` + attr +
+			`<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">` +
+			renderHTMLBody(strings.Join(quoted, "\n")) + `</blockquote></div>`)
+	}
+	flush()
+	return out.String()
 }

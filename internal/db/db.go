@@ -454,6 +454,11 @@ func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, off
 		args = append(args, viewFolder)
 	case "important":
 		conditions = append(conditions, "(label = 'Important' OR is_starred = 1) AND is_deleted = 0")
+	case "archive":
+		// Conversations whose received mail has all been archived (not spammed or snoozed).
+		conditions = append(conditions, `is_deleted = 0 AND thread_id IN (SELECT thread_id FROM emails
+			WHERE mailbox_id = ? AND is_deleted = 0 AND folder = 'inbox' GROUP BY thread_id HAVING MIN(is_archived) = 1)`)
+		args = append(args, mailboxID)
 	case "trash":
 		conditions = append(conditions, "is_deleted = 1")
 	case "all":

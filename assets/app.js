@@ -19,6 +19,7 @@ let selected = new Set();
 let moreOpen = false;
 let pendingAttachments = [];
 let expanded = new Set(); // ids of the open conversation's messages shown in full
+let quoteText = ""; // sent after what was typed: the quoted reply or the forwarded message
 
 const $ = (s) => document.querySelector(s);
 const rowsEl = $("#mailrows");
@@ -70,6 +71,7 @@ const VIEWS = [
   { key: "inbox", label: "Kotak masuk", icon: "inbox", fill: true, cls: "icon-blue" },
   { key: "starred", label: "Berbintang", icon: "star", fill: true },
   { key: "sent", label: "Terkirim", icon: "send", fill: true },
+  { key: "archive", label: "Arsip", icon: "archive" },
   { key: "trash", label: "Sampah", icon: "delete" },
 ];
 
@@ -318,26 +320,60 @@ function renderRows() {
 
 // Email HTML goes into a sandboxed iframe: scripts, forms and plugins are blocked,
 // links open in a new tab. allow-same-origin (without allow-scripts) only lets us size it.
-function emailFrame(html) {
+// Quoted history inside a message, as Gmail, Apple Mail and Thunderbird mark it up.
+const QUOTES = ".gmail_quote, blockquote[type=cite], .moz-cite-prefix";
+
+// foldQuotes hides that history behind a "•••" button, as Gmail does in a conversation.
+function emailFrame(html, foldQuotes = false) {
   const frame = document.createElement("iframe");
   frame.className = "reader-frame";
   frame.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
   frame.setAttribute("title", "Isi email");
   frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank">
-    <style>body{margin:0;font:14px/1.6 Roboto,Arial,sans-serif;color:#1f1f1f;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style>
-    </head><body>${html}</body></html>`;
+    <style>body{margin:0;font:14px/1.6 Roboto,Arial,sans-serif;color:#1f1f1f;overflow-wrap:anywhere}img{max-width:100%;height:auto}
+    .wm-fold :is(${QUOTES}){display:none}</style>
+    </head><body class="${foldQuotes ? "wm-fold" : ""}">${html}</body></html>`;
   frame.addEventListener("load", () => {
     const doc = frame.contentDocument;
     if (!doc) return;
-    const fit = () => { frame.style.height = doc.documentElement.scrollHeight + "px"; };
+    // The box, not scrollHeight: that never drops below the frame's own 150px default.
+    const fit = () => { frame.style.height = Math.ceil(doc.documentElement.getBoundingClientRect().height) + "px"; };
     fit();
     new ResizeObserver(fit).observe(doc.body);
+    if (foldQuotes && doc.querySelector(QUOTES)) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "quote-toggle";
+      btn.setAttribute("aria-label", "Tampilkan teks yang dikutip");
+      btn.setAttribute("aria-expanded", "false");
+      btn.innerHTML = `<span aria-hidden="true">•••</span>`;
+      btn.onclick = () => btn.setAttribute("aria-expanded", String(!doc.body.classList.toggle("wm-fold")));
+      frame.after(btn);
+    }
   });
   return frame;
 }
 
+// textHtml renders plain-text mail; "> " runs become blockquotes instead of showing the marks.
 function textHtml(text) {
-  return (text || "").split(/\r?\n\r?\n/).map((p) => `<p>${esc(p).replace(/\r?\n/g, "<br>")}</p>`).join("");
+  const lines = (text || "").replace(/\r/g, "").split("\n");
+  let html = "";
+  let para = [];
+  const flush = () => { if (para.length) html += `<p>${para.join("<br>")}</p>`; para = []; };
+  for (let i = 0; i < lines.length;) {
+    if (!lines[i].startsWith(">")) {
+      if (lines[i].trim()) para.push(esc(lines[i]));
+      else flush();
+      i++;
+      continue;
+    }
+    const quoted = [];
+    for (; i < lines.length && lines[i].startsWith(">"); i++) quoted.push(lines[i].slice(1).replace(/^ /, ""));
+    flush();
+    html += `<blockquote class="gmail_quote">${textHtml(quoted.join("\n"))}</blockquote>`;
+  }
+  flush();
+  return html;
 }
 
 function attachmentsHtml(x) {
@@ -438,7 +474,7 @@ function renderReader() {
     </div>` : `<p class="reader-note">Mailbox ini hanya bisa dibaca (hak terima saja).</p>`}`;
 
   for (const x of thread) {
-    if (expanded.has(x.id) && x.bodyHtml?.trim()) $(`[data-msg="${x.id}"] [data-body]`).appendChild(emailFrame(x.bodyHtml));
+    if (expanded.has(x.id) && x.bodyHtml?.trim()) $(`[data-msg="${x.id}"] [data-body]`).appendChild(emailFrame(x.bodyHtml, thread.length > 1));
   }
 }
 
@@ -475,11 +511,21 @@ function quoteHeader(m) {
   return { date: formatFullDate(m.createdAt), author };
 }
 
-function setQuote(text, open) {
-  $("#composeQuote").value = text;
-  $("#composeQuote").hidden = !open;
-  $("#btnQuote").hidden = false;
-  $("#btnQuote").setAttribute("aria-expanded", String(open));
+// setQuote keeps the text to send after the reply and shows the original message,
+// formatted, behind "•••". forward lays it out as a forwarded message, not a quote.
+function setQuote(text, head, m, forward) {
+  quoteText = text;
+  const q = $("#composeQuote");
+  q.innerHTML = m ? `<div class="gmail_attr">${esc(head).replace(/\n/g, "<br>")}</div>
+    <${forward ? "div" : "blockquote"} data-body></${forward ? "div" : "blockquote"}>` : "";
+  if (m) {
+    const body = q.querySelector("[data-body]");
+    if (m.bodyHtml?.trim()) body.appendChild(emailFrame(m.bodyHtml));
+    else body.innerHTML = textHtml(m.bodyText);
+  }
+  q.hidden = !forward;
+  $("#btnQuote").hidden = !m;
+  $("#btnQuote").setAttribute("aria-expanded", String(!!forward));
 }
 
 // startReply opens the reply box under the conversation. mode: reply | replyAll | forward.
@@ -493,7 +539,8 @@ function startReply(m, mode) {
   $("#composeInReplyTo").value = m.messageId || "";
   if (mode === "forward") {
     $("#composeSubject").value = /^fwd?:/i.test(sub) ? sub : `Fwd: ${sub}`;
-    setQuote(`---------- Pesan yang diteruskan ---------\nDari: ${author}\nTanggal: ${date}\nSubjek: ${sub}\nKepada: ${(m.toRecipients || []).join(", ")}\n\n${m.bodyText || ""}`, true);
+    const head = `---------- Pesan yang diteruskan ---------\nDari: ${author}\nTanggal: ${date}\nSubjek: ${sub}\nKepada: ${(m.toRecipients || []).join(", ")}`;
+    setQuote(`${head}\n\n${m.bodyText || ""}`, head, m, true);
     $("#composeTo").focus();
   } else {
     const self = lc(currentMailbox()?.address);
@@ -507,7 +554,11 @@ function startReply(m, mode) {
     $("#composeCc").value = cc.join(", ");
     $("#composeCcRow").hidden = !cc.length;
     $("#composeSubject").value = /^re:/i.test(sub) ? sub : `Re: ${sub}`;
-    setQuote(`Pada ${date}, ${author} menulis:\n${(m.bodyText || "").split("\n").map((l) => `> ${l}`).join("\n")}`, false);
+    // The text part quotes with "> " as mail always has; the server turns it into a
+    // blockquote for the HTML part, so nobody sees the marks.
+    const head = `Pada ${date}, ${author} menulis:`;
+    const lines = (m.bodyText || "").replace(/\r/g, "").trimEnd().split("\n");
+    setQuote(`${head}\n${lines.map((l) => (l ? `> ${l}` : ">")).join("\n")}`, head, m, false);
     $("#composeBody").focus();
   }
   $("#compose").scrollIntoView({ block: "nearest" });
@@ -694,8 +745,7 @@ function resetCompose() {
   $("#composeSubject").value = "";
   $("#composeBody").value = "";
   $("#composeInReplyTo").value = "";
-  setQuote("", false);
-  $("#btnQuote").hidden = true;
+  setQuote("", "", null, false);
   pendingAttachments = [];
   renderComposeAttachments();
 }
@@ -762,7 +812,7 @@ sendBtn.addEventListener("click", async () => {
   fd.append("to", to);
   fd.append("cc", $("#composeCc").value.trim());
   fd.append("subject", $("#composeSubject").value.trim());
-  fd.append("body", [$("#composeBody").value.trim(), $("#composeQuote").value.trim()].filter(Boolean).join("\n\n"));
+  fd.append("body", [$("#composeBody").value.trim(), quoteText.trim()].filter(Boolean).join("\n\n"));
   fd.append("inReplyTo", $("#composeInReplyTo").value.trim());
   for (const file of pendingAttachments) fd.append("attachments", file);
 

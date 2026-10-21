@@ -196,12 +196,18 @@ func TestConversations(t *testing.T) {
 	if list, _, _ = d.ListEmails(mb, "inbox", "", 50, 0); len(list) != 1 || list[0].ID != other {
 		t.Fatalf("after archiving, inbox = %+v, want only %d", list, other)
 	}
+	if list, _, _ = d.ListEmails(mb, "archive", "", 50, 0); len(list) != 1 || list[0].ID != last {
+		t.Fatalf("Arsip = %+v, want the archived conversation", list)
+	}
 	if list, _, _ = d.ListEmails(mb, "all", "", 50, 0); len(list) != 2 || list[1].InInbox {
 		t.Fatalf("archived conversation should stay in Semua email, outside the inbox: %+v", list)
 	}
 	spam := "spam"
 	if err := d.UpdateEmailStatus(last, models.UpdateStatusRequest{Folder: &spam}); err != nil {
 		t.Fatal(err)
+	}
+	if list, _, _ = d.ListEmails(mb, "archive", "", 50, 0); len(list) != 0 {
+		t.Fatalf("a conversation moved to Spam must leave Arsip: %+v", list)
 	}
 	if list, _, _ = d.ListEmails(mb, "sent", "", 50, 0); len(list) != 1 {
 		t.Fatalf("moving a conversation must leave its sent copy in Terkirim: %+v", list)

@@ -62,3 +62,10 @@ func TestInReplyToCannotAddHeaders(t *testing.T) {
 		t.Fatal("CR/LF in a header value started a new header line")
 	}
 }
+
+func TestSnippetSkipsQuotedReply(t *testing.T) {
+	text := "Daftar:\n\nSiap, sampai ketemu.\n\nOn Wed, Budi <b@x> wrote:\n\n> Rapat?\n>\n> > Kapan?\n"
+	if got := CleanSnippet(text, 120); got != "Daftar: Siap, sampai ketemu." {
+		t.Fatalf("snippet = %q", got)
+	}
+}

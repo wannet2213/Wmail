@@ -247,6 +247,24 @@ func TestSendViaResend(t *testing.T) {
 	if got["from"] != `"Kotak A" <a@x.test>` || got["html"] != "<p>Halo &lt;b&gt;</p>" {
 		t.Fatalf("resend payload: %v", got)
 	}
+
+	// A reply quotes with "> " in the text part but must not show the marks in HTML.
+	body.Reset()
+	mw = multipart.NewWriter(&body)
+	mw.WriteField("from", itoa(e.mbA))
+	mw.WriteField("to", "dest@example.com")
+	mw.WriteField("body", "Oke.\r\n\r\nPada Senin, Budi menulis:\r\n> Rapat?\r\n> > Kapan?")
+	mw.Close()
+	req = httptest.NewRequest("POST", "/api/emails/send", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(root)
+	e.router.ServeHTTP(httptest.NewRecorder(), req)
+	quote := `<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">`
+	want := `<p>Oke.</p><div class="gmail_quote"><div class="gmail_attr">Pada Senin, Budi menulis:</div>` + quote +
+		`<p>Rapat?</p><div class="gmail_quote">` + quote + `<p>Kapan?</p></blockquote></div></blockquote></div>`
+	if got["html"] != want || !strings.HasSuffix(got["text"].(string), "> > Kapan?") {
+		t.Fatalf("reply html = %v\nwant %s", got["html"], want)
+	}
 	var stats models.Stats
 	json.NewDecoder(e.do(t, root, "GET", path("/api/stats", e.mbA), nil).Body).Decode(&stats)
 	if stats.SentCount != 1 {

@@ -327,8 +327,27 @@ func domainOf(addr string) string {
 	return "wmail.local"
 }
 
+// CleanSnippet flattens text for list previews. Like Gmail it leaves quoted replies
+// out: "> " lines and the "X menulis:" / "X wrote:" line just above them.
 func CleanSnippet(text string, maxLen int) string {
-	text = strings.Join(strings.Fields(text), " ")
+	var kept []string
+	inQuote := false
+	for _, l := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), ">") {
+			kept, inQuote = append(kept, l), false
+			continue
+		}
+		if !inQuote {
+			for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+				kept = kept[:len(kept)-1]
+			}
+			if n := len(kept); n > 0 && strings.HasSuffix(strings.TrimSpace(kept[n-1]), ":") {
+				kept = kept[:n-1]
+			}
+		}
+		inQuote = true
+	}
+	text = strings.Join(strings.Fields(strings.Join(kept, "\n")), " ")
 	if r := []rune(text); len(r) > maxLen {
 		return string(r[:maxLen]) + "..."
 	}
