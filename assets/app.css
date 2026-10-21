@@ -773,6 +773,8 @@ body.page { overflow: auto; }
 .page-main { max-width: 880px; margin: 0 auto; padding: 8px 16px 64px; display: flex; flex-direction: column; gap: 16px; }
 .page-main > section { background: var(--surface); border-radius: 16px; padding: 20px 24px; }
 .page-main h2 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
+.access-user + .access-user { border-top: 1px solid var(--line); margin-top: 16px; }
+.access-user h3 { font-size: 15px; font-weight: 500; margin: 16px 0 0; }
 .inline-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 12px; }
 .inline-form .settings-field { margin: 0; flex: 1 1 180px; }
 .inline-form .check { display: flex; align-items: center; gap: 6px; font-size: 13px; height: 38px; }

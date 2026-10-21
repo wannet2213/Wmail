@@ -1,9 +1,12 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -39,11 +42,48 @@ func SetupRouter(a *API, web fs.FS) http.Handler {
 	mux.Handle("POST /api/admin/settings", a.admin(a.AdminSaveSettings))
 
 	mux.Handle("/api/", http.NotFoundHandler())
-	mux.Handle("/", http.FileServerFS(web))
+	mux.Handle("/", staticHandler(web))
 
 	// Rejects state-changing browser requests from other origins (login CSRF, sibling
 	// subdomains). Requests without Sec-Fetch-Site/Origin, like the Worker's push, pass.
 	return securityHeaders(loggingMiddleware(http.NewCrossOriginProtection().Handler(mux)))
+}
+
+var assetRef = regexp.MustCompile(`((?:href|src)="assets/[^"?]+\.(?:js|css))"`)
+
+// staticHandler serves the web files. Pages are served with ?v=<content hash> on their
+// script and stylesheet URLs: Cloudflare tells browsers to keep .js/.css for 4 hours,
+// so after an upgrade they ran the old scripts against the new pages.
+func staticHandler(web fs.FS) http.Handler {
+	h := sha256.New()
+	_ = fs.WalkDir(web, ".", func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			b, _ := fs.ReadFile(web, p)
+			h.Write([]byte(p))
+			h.Write(b)
+		}
+		return nil
+	})
+	ver := hex.EncodeToString(h.Sum(nil))[:12]
+
+	pages := map[string][]byte{} // URL path -> page
+	names, _ := fs.Glob(web, "*.html")
+	for _, name := range names {
+		if b, err := fs.ReadFile(web, name); err == nil {
+			pages["/"+strings.TrimSuffix(name, "index.html")] = assetRef.ReplaceAll(b, []byte(`$1?v=`+ver+`"`))
+		}
+	}
+	files := http.FileServerFS(web)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, ok := pages[r.URL.Path]
+		if !ok {
+			files.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(page)
+	})
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
