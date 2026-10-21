@@ -145,6 +145,7 @@ var migrations = []migration{
 	CREATE UNIQUE INDEX idx_emails_mailbox_msgid ON emails(mailbox_id, message_id) WHERE message_id != '';`},
 	{run: normalizeTimestamps},
 	{run: linkThreads},
+	{run: addColumns},
 }
 
 func (d *DB) migrate() error {
@@ -284,6 +285,26 @@ func linkThreads(tx *sql.Tx) error {
 	return err
 }
 
+// addColumns adds the mailbox signature and the Bcc list of sent mail. Existing columns
+// are skipped, so the step is safe to run again on a database a newer build touched.
+func addColumns(tx *sql.Tx) error {
+	for _, c := range []struct{ table, col, def string }{
+		{"mailboxes", "signature", "TEXT NOT NULL DEFAULT ''"},
+		{"emails", "bcc_recipients", "TEXT"},
+	} {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.col).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := tx.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.col, c.def)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 /* ---------- emails ---------- */
 
 type querier interface {
@@ -306,7 +327,7 @@ func threadFor(q querier, m *models.Email) string {
 		m.MailboxID, m.InReplyTo).Scan(&thread) == nil {
 		return thread
 	}
-	if base := baseSubject(m.Subject); m.Folder != "sent" && base != "" && base != strings.TrimSpace(m.Subject) {
+	if base := baseSubject(m.Subject); m.Folder != "sent" && m.Folder != "scheduled" && base != "" && base != strings.TrimSpace(m.Subject) {
 		rows, err := q.Query(`SELECT subject, thread_id FROM emails
 			WHERE mailbox_id = ? AND thread_id != '' AND instr(subject, ?) > 0
 			AND (from_email = ? COLLATE NOCASE OR instr(lower(to_recipients || COALESCE(cc_recipients, '')), lower(?)) > 0)
@@ -328,7 +349,7 @@ func threadFor(q querier, m *models.Email) string {
 }
 
 const emailCols = `id, COALESCE(mailbox_id, 0), provider, message_id, in_reply_to, thread_id, from_name, from_email,
-	to_recipients, cc_recipients, subject, snippet, body_text,
+	to_recipients, cc_recipients, COALESCE(bcc_recipients, ''), subject, snippet, body_text,
 	body_html, is_unread, is_starred, is_archived, is_deleted,
 	folder, category, label, has_attachments, created_at, updated_at`
 
@@ -337,11 +358,12 @@ type scanner interface{ Scan(dest ...any) error }
 // scanEmail reads emailCols, then any extra columns the query appends into extra.
 func scanEmail(row scanner, extra ...any) (*models.Email, error) {
 	var m models.Email
+	var bccJSON string
 	var toJSON, ccJSON, msgID, inReplyTo, threadID, fromName, snippet, bodyText, bodyHTML, category, label sql.NullString
 	var unread, starred, archived, deleted, hasAtt int
 	err := row.Scan(append([]any{
 		&m.ID, &m.MailboxID, &m.Provider, &msgID, &inReplyTo, &threadID, &fromName, &m.FromEmail,
-		&toJSON, &ccJSON, &m.Subject, &snippet, &bodyText,
+		&toJSON, &ccJSON, &bccJSON, &m.Subject, &snippet, &bodyText,
 		&bodyHTML, &unread, &starred, &archived, &deleted,
 		&m.Folder, &category, &label, &hasAtt, &m.CreatedAt, &m.UpdatedAt,
 	}, extra...)...)
@@ -357,6 +379,9 @@ func scanEmail(row scanner, extra ...any) (*models.Email, error) {
 	if ccJSON.String != "" {
 		_ = json.Unmarshal([]byte(ccJSON.String), &m.CcRecipients)
 	}
+	if bccJSON != "" {
+		_ = json.Unmarshal([]byte(bccJSON), &m.BccRecipients)
+	}
 	return &m, nil
 }
 
@@ -365,6 +390,7 @@ func scanEmail(row scanner, extra ...any) (*models.Email, error) {
 func (d *DB) SaveEmail(m *models.Email) error {
 	toJSON, _ := json.Marshal(m.ToRecipients)
 	ccJSON, _ := json.Marshal(m.CcRecipients)
+	bccJSON, _ := json.Marshal(m.BccRecipients)
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now()
 	}
@@ -383,12 +409,12 @@ func (d *DB) SaveEmail(m *models.Email) error {
 	res, err := tx.Exec(`
 	INSERT OR IGNORE INTO emails (
 		mailbox_id, provider, message_id, in_reply_to, thread_id, from_name, from_email,
-		to_recipients, cc_recipients, subject, snippet, body_text,
+		to_recipients, cc_recipients, bcc_recipients, subject, snippet, body_text,
 		body_html, is_unread, is_starred, is_archived, is_deleted,
 		folder, category, label, has_attachments, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.MailboxID, m.Provider, m.MessageID, m.InReplyTo, m.ThreadID, m.FromName, m.FromEmail,
-		string(toJSON), string(ccJSON), m.Subject, m.Snippet, m.BodyText,
+		string(toJSON), string(ccJSON), string(bccJSON), m.Subject, m.Snippet, m.BodyText,
 		m.BodyHTML, boolToInt(m.IsUnread), boolToInt(m.IsStarred), boolToInt(m.IsArchived), boolToInt(m.IsDeleted),
 		m.Folder, m.Category, m.Label, boolToInt(m.HasAttachments), m.CreatedAt, m.UpdatedAt,
 	)
@@ -449,7 +475,7 @@ func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, off
 	switch viewFolder {
 	case "starred":
 		conditions = append(conditions, "is_starred = 1 AND is_deleted = 0")
-	case "snoozed", "sent", "drafts", "spam":
+	case "snoozed", "sent", "drafts", "spam", "scheduled":
 		conditions = append(conditions, "folder = ? AND is_deleted = 0")
 		args = append(args, viewFolder)
 	case "important":
@@ -522,7 +548,8 @@ func (d *DB) ListEmails(mailboxID int64, viewFolder, queryStr string, limit, off
 const sameThread = "(mailbox_id, thread_id) = (SELECT mailbox_id, thread_id FROM emails WHERE id = ?)"
 
 // UpdateEmailStatus stars one message; every other change applies to its whole
-// conversation, as in Gmail. Sent copies keep their folder and read state.
+// conversation, as in Gmail. Sent and scheduled mail keep their folder and read state:
+// moving a conversation to the inbox must not turn a scheduled message into received mail.
 func (d *DB) UpdateEmailStatus(id int64, req models.UpdateStatusRequest) error {
 	if req.IsStarred != nil {
 		if _, err := d.conn.Exec("UPDATE emails SET is_starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", boolToInt(*req.IsStarred), id); err != nil {
@@ -533,7 +560,7 @@ func (d *DB) UpdateEmailStatus(id int64, req models.UpdateStatusRequest) error {
 	var args []any
 	add := func(col string, v any) { sets = append(sets, col+" = ?"); args = append(args, v) }
 	keepSent := func(col string, v any) {
-		sets = append(sets, col+" = CASE WHEN folder = 'sent' THEN "+col+" ELSE ? END")
+		sets = append(sets, col+" = CASE WHEN folder IN ('sent', 'scheduled') THEN "+col+" ELSE ? END")
 		args = append(args, v)
 	}
 
@@ -616,6 +643,44 @@ func (d *DB) deleteEmailsWhere(where string, args ...any) error {
 		_ = os.Remove(p)
 	}
 	return nil
+}
+
+// DueScheduled lists scheduled mail whose time has come, oldest first. A scheduled
+// message keeps its send time in created_at, so lists show and sort it by that time.
+func (d *DB) DueScheduled(now time.Time) ([]int64, error) {
+	rows, err := d.conn.Query(`SELECT id FROM emails WHERE folder = 'scheduled' AND is_deleted = 0 AND created_at <= ? ORDER BY created_at`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// MarkSent turns a delivered scheduled message into sent mail.
+func (d *DB) MarkSent(id int64, provider, messageID string) error {
+	now := time.Now()
+	_, err := d.conn.Exec(`UPDATE emails SET folder = 'sent', provider = ?, message_id = ?, created_at = ?, updated_at = ? WHERE id = ?`,
+		provider, messageID, now, now, id)
+	return err
+}
+
+// Reschedule moves a scheduled message to a new send time.
+func (d *DB) Reschedule(id int64, at time.Time) error {
+	_, err := d.conn.Exec(`UPDATE emails SET created_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND folder = 'scheduled'`, at, id)
+	return err
+}
+
+// Unschedule deletes a scheduled message that has not gone out yet.
+func (d *DB) Unschedule(id int64) error {
+	return d.deleteEmailsWhere("id = ? AND folder = 'scheduled'", id)
 }
 
 // DeleteEmail permanently removes the trashed messages of id's conversation.
@@ -907,8 +972,9 @@ func (d *DB) CreateMailbox(address, displayName string) (int64, error) {
 	return res.LastInsertId()
 }
 
-func (d *DB) UpdateMailboxName(id int64, displayName string) error {
-	_, err := d.conn.Exec("UPDATE mailboxes SET display_name = ? WHERE id = ?", strings.TrimSpace(displayName), id)
+func (d *DB) UpdateMailbox(id int64, displayName, signature string) error {
+	_, err := d.conn.Exec("UPDATE mailboxes SET display_name = ?, signature = ? WHERE id = ?",
+		strings.TrimSpace(displayName), strings.TrimSpace(strings.ReplaceAll(signature, "\r\n", "\n")), id)
 	return err
 }
 
@@ -930,7 +996,7 @@ func (d *DB) MailboxByAddress(address string) (*models.Mailbox, error) {
 }
 
 func (d *DB) ListMailboxes() ([]models.Mailbox, error) {
-	return d.queryMailboxes("SELECT id, address, display_name, 1 FROM mailboxes ORDER BY address")
+	return d.queryMailboxes("SELECT id, address, display_name, signature, 1 FROM mailboxes ORDER BY address")
 }
 
 // MailboxesForUser returns what u may open; admins get everything with send rights.
@@ -938,7 +1004,7 @@ func (d *DB) MailboxesForUser(u *models.User) ([]models.Mailbox, error) {
 	if u.IsAdmin {
 		return d.ListMailboxes()
 	}
-	return d.queryMailboxes(`SELECT m.id, m.address, m.display_name, g.can_send FROM mailboxes m
+	return d.queryMailboxes(`SELECT m.id, m.address, m.display_name, m.signature, g.can_send FROM mailboxes m
 		JOIN user_mailboxes g ON g.mailbox_id = m.id WHERE g.user_id = ? ORDER BY m.address`, u.ID)
 }
 
@@ -952,7 +1018,7 @@ func (d *DB) queryMailboxes(q string, args ...any) ([]models.Mailbox, error) {
 	for rows.Next() {
 		var m models.Mailbox
 		var canSend int
-		if err := rows.Scan(&m.ID, &m.Address, &m.DisplayName, &canSend); err != nil {
+		if err := rows.Scan(&m.ID, &m.Address, &m.DisplayName, &m.Signature, &canSend); err != nil {
 			return nil, err
 		}
 		m.CanSend = canSend == 1

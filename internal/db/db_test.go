@@ -209,13 +209,20 @@ func TestConversations(t *testing.T) {
 	if list, _, _ = d.ListEmails(mb, "archive", "", 50, 0); len(list) != 0 {
 		t.Fatalf("a conversation moved to Spam must leave Arsip: %+v", list)
 	}
+	later := save(models.Email{InReplyTo: "<b@luar>", FromEmail: "info@contoh.com", Subject: "Re: Rapat", Folder: "scheduled", CreatedAt: at(9)})
+	inbox := "inbox"
+	_ = d.UpdateEmailStatus(last, models.UpdateStatusRequest{Folder: &inbox})
+	if m, _ := d.GetEmail(later); m.Folder != "scheduled" {
+		t.Fatalf("moving the conversation turned scheduled mail into %q", m.Folder)
+	}
+	_ = d.UpdateEmailStatus(last, models.UpdateStatusRequest{Folder: &spam})
 	if list, _, _ = d.ListEmails(mb, "sent", "", 50, 0); len(list) != 1 {
 		t.Fatalf("moving a conversation must leave its sent copy in Terkirim: %+v", list)
 	}
 
 	m, _ := d.GetEmail(last)
 	thread, err := d.Thread(m)
-	if err != nil || len(thread) != 3 || thread[0].ID != first || thread[2].ID != last {
+	if err != nil || len(thread) != 4 || thread[0].ID != first || thread[2].ID != last {
 		t.Fatalf("thread = %+v, %v", thread, err)
 	}
 

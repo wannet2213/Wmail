@@ -34,8 +34,9 @@ const sendable = () => me.mailboxes.filter((m) => m.canSend);
 const canManage = () => !!currentMailbox()?.canSend;
 const lc = (s) => String(s || "").toLowerCase();
 const isInbox = (x) => x.folder === "inbox" && !x.isArchived && !x.isDeleted;
-// A conversation made only of our own sent mail has no inbox to go back to.
-const movable = (x) => x.isDeleted || x.folder !== "sent" || x.threadCount > 1;
+// A conversation made only of our own outgoing mail has no inbox to go back to.
+const outgoing = (x) => x.folder === "sent" || x.folder === "scheduled";
+const movable = (x) => x.isDeleted || !outgoing(x) || x.threadCount > 1;
 const threadOf = (m) => (m.thread?.length ? m.thread : [m]);
 
 function formatSize(bytes) {
@@ -71,6 +72,7 @@ const VIEWS = [
   { key: "inbox", label: "Kotak masuk", icon: "inbox", fill: true, cls: "icon-blue" },
   { key: "starred", label: "Berbintang", icon: "star", fill: true },
   { key: "sent", label: "Terkirim", icon: "send", fill: true },
+  { key: "scheduled", label: "Terjadwal", icon: "watch_later" },
   { key: "archive", label: "Arsip", icon: "archive" },
   { key: "trash", label: "Sampah", icon: "delete" },
 ];
@@ -265,7 +267,7 @@ function renderNav() {
 }
 
 function rowHtml(m) {
-  const isSent = m.folder === "sent";
+  const isSent = outgoing(m);
   const fromLabel = isSent ? `Kepada: ${(m.toRecipients || []).join(", ") || "(tidak diketahui)"}` : (m.fromName || m.fromEmail);
   const sel = selected.has(m.id);
 
@@ -408,7 +410,12 @@ function messageHtml(x, open, canReply, foldable) {
       </div>
     </div>`;
   }
-  const cc = x.ccRecipients?.length ? `, cc ${x.ccRecipients.join(", ")}` : "";
+  const cc = (x.ccRecipients?.length ? `, cc ${x.ccRecipients.join(", ")}` : "") +
+    (x.bccRecipients?.length ? `, bcc ${x.bccRecipients.join(", ")}` : "");
+  const scheduled = x.folder === "scheduled" ? `<div class="sched-banner">
+      <span class="ms">schedule</span><span>Akan dikirim ${esc(formatFullDate(x.createdAt))}</span>
+      ${canReply ? `<button class="text-btn" data-unschedule>Batalkan pengiriman</button>` : ""}
+    </div>` : "";
   return `<div class="msg" data-msg="${x.id}">
     <div class="reader-msg-head" ${toggle}>
       ${avatar}
@@ -424,6 +431,7 @@ function messageHtml(x, open, canReply, foldable) {
         <button class="iconbtn" data-reply="forward" aria-label="Teruskan"><span class="ms">forward</span></button>` : ""}
       </span>
     </div>
+    ${scheduled}
     <div class="reader-content" data-body>${x.bodyHtml?.trim() ? "" : textHtml(x.bodyText)}</div>
     ${attachmentsHtml(x)}
   </div>`;
@@ -458,7 +466,7 @@ function renderReader() {
   const inbox = thread.some(isInbox);
   for (const id of ["#btnRSpam", "#btnRDelete", "#btnRSnooze"]) $(id).hidden = !canManage();
   $("#btnRArchive").hidden = !canManage() || !inbox;
-  $("#btnRInbox").hidden = !canManage() || inbox || !thread.some((x) => x.isDeleted || x.folder !== "sent");
+  $("#btnRInbox").hidden = !canManage() || inbox || !thread.some((x) => x.isDeleted || !outgoing(x));
   const pos = Math.max(1, mails.findIndex((x) => x.id === m.id) + 1);
   $("#readerPos").textContent = `${pos} dari ${mails.length || 1}`;
 
@@ -487,6 +495,7 @@ $("#readerThread").addEventListener("click", async (e) => {
   const x = msgEl ? thread.find((t) => t.id === Number(msgEl.dataset.msg)) : thread[thread.length - 1];
   const btn = e.target.closest("button");
   if (btn?.dataset.reply) return startReply(x, btn.dataset.reply);
+  if (btn?.hasAttribute("data-unschedule")) return unschedule(x);
   if (btn?.hasAttribute("data-star")) {
     x.isStarred = !x.isStarred;
     await apiUpdateEmail(x.id, { isStarred: x.isStarred });
@@ -503,6 +512,29 @@ $("#readerThread").addEventListener("keydown", (e) => {
     e.target.click();
   }
 });
+
+// unschedule cancels a scheduled message and reopens it in the composer, as Gmail does.
+async function unschedule(x) {
+  const res = await api(`/api/emails/${x.id}/unschedule`, { method: "POST" });
+  if (!res.ok) return showSnackbar((await res.text()) || "Gagal membatalkan.");
+  const m = await res.json();
+  openId = null;
+  currentMailDetail = null;
+  renderReader();
+  apiGetEmails();
+  resetCompose();
+  openCompose();
+  $("#composeFrom").value = String(m.mailboxId);
+  $("#composeTo").value = (m.toRecipients || []).join(", ");
+  for (const [field, list] of [["Cc", m.ccRecipients], ["Bcc", m.bccRecipients]]) {
+    $(`#compose${field}`).value = (list || []).join(", ");
+    $(`#compose${field}Row`).hidden = !list?.length;
+  }
+  $("#composeSubject").value = m.subject === "(no subject)" ? "" : m.subject;
+  $("#composeInReplyTo").value = m.inReplyTo || "";
+  editor.innerHTML = m.bodyHtml || textHtml(m.bodyText);
+  showSnackbar(m.attachments?.length ? "Pengiriman dibatalkan. Lampirannya perlu ditambahkan lagi." : "Pengiriman dibatalkan.");
+}
 
 /* ---------- Reply & Forward (inline, under the conversation) ---------- */
 
@@ -559,7 +591,7 @@ function startReply(m, mode) {
     const head = `Pada ${date}, ${author} menulis:`;
     const lines = (m.bodyText || "").replace(/\r/g, "").trimEnd().split("\n");
     setQuote(`${head}\n${lines.map((l) => (l ? `> ${l}` : ">")).join("\n")}`, head, m, false);
-    $("#composeBody").focus();
+    editor.focus();
   }
   $("#compose").scrollIntoView({ block: "nearest" });
 }
@@ -723,6 +755,7 @@ function openCompose(inline = false) {
   $("#composeFrom").innerHTML = list.map((m) =>
     `<option value="${m.id}" ${m.id === from ? "selected" : ""}>${esc(m.displayName ? `${m.displayName} <${m.address}>` : m.address)}</option>`
   ).join("");
+  syncSignature();
   const comp = $("#compose");
   comp.classList.toggle("is-inline", inline);
   comp.classList.remove("is-min", "is-full");
@@ -740,10 +773,13 @@ function closeCompose() {
 
 function resetCompose() {
   $("#composeTo").value = "";
-  $("#composeCc").value = "";
-  $("#composeCcRow").hidden = true;
+  for (const f of ["Cc", "Bcc"]) {
+    $(`#compose${f}`).value = "";
+    $(`#compose${f}Row`).hidden = true;
+  }
   $("#composeSubject").value = "";
-  $("#composeBody").value = "";
+  editor.innerHTML = "";
+  lastRange = null;
   $("#composeInReplyTo").value = "";
   setQuote("", "", null, false);
   pendingAttachments = [];
@@ -784,11 +820,137 @@ $("#btnQuote").addEventListener("click", () => {
 });
 $("#composeMin").addEventListener("click", () => $("#compose").classList.toggle("is-min"));
 $("#composeFull").addEventListener("click", () => $("#compose").classList.toggle("is-full"));
-$("#btnCcToggle").addEventListener("click", () => {
-  const row = $("#composeCcRow");
-  row.hidden = !row.hidden;
-  if (!row.hidden) $("#composeCc").focus();
+for (const b of document.querySelectorAll(".text-toggle")) {
+  b.addEventListener("click", () => {
+    const row = $(`#${b.dataset.show}`);
+    row.hidden = false;
+    row.querySelector("input").focus();
+  });
+}
+
+/* ---------- Editor: formatting, links, emoji, signature ---------- */
+
+const editor = $("#composeBody");
+let lastRange = null; // the caret in the editor, put back before inserting from a toolbar
+
+document.addEventListener("selectionchange", () => {
+  const sel = getSelection();
+  if (sel.rangeCount && editor.contains(sel.anchorNode)) lastRange = sel.getRangeAt(0).cloneRange();
 });
+
+function restoreCaret() {
+  editor.focus();
+  if (!lastRange) return;
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(lastRange);
+}
+
+// execCommand is deprecated but still the one native way to edit rich text; no library needed.
+const exec = (cmd, arg) => { restoreCaret(); document.execCommand(cmd, false, arg); };
+
+$("#btnFormat").addEventListener("click", () => {
+  const bar = $("#formatBar");
+  bar.hidden = !bar.hidden;
+  $("#btnFormat").setAttribute("aria-pressed", String(!bar.hidden));
+});
+// mousedown would move focus out of the editor and lose the selection being formatted.
+$("#formatBar").addEventListener("mousedown", (e) => e.preventDefault());
+$("#formatBar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-cmd]");
+  if (b) exec(b.dataset.cmd, b.dataset.arg);
+});
+
+$("#btnLink").addEventListener("mousedown", (e) => e.preventDefault());
+$("#btnLink").addEventListener("click", () => {
+  const text = lastRange?.toString() || "";
+  let url = prompt("Alamat link (URL atau email):", "")?.trim();
+  if (!url) return;
+  if (!/^(https?:|mailto:)/i.test(url)) url = (/^[^\s/]+@[^\s/]+$/.test(url) ? "mailto:" : "https://") + url;
+  if (text) exec("createLink", url);
+  else exec("insertHTML", `<a href="${esc(url)}">${esc(url.replace(/^mailto:/i, ""))}</a>`);
+});
+
+const EMOJI = "😀 😁 😂 🤣 😊 😍 😘 😉 😎 🤩 🤔 😅 😢 😭 😡 😴 🙏 👍 👎 👏 🙌 💪 👋 🤝 ❤️ 💔 🔥 ✨ 🎉 🎁 ✅ ❌ ⭐ 📌 📎 📅 ⏰ 💡 📞 ✉️ 🚀 ☕ 🍰 🌹 😇 🥳 🤗 😬".split(" ");
+$("#emojiPanel").innerHTML = EMOJI.map((e) => `<button type="button" data-emoji="${e}" aria-label="${e}">${e}</button>`).join("");
+$("#emojiPanel").addEventListener("mousedown", (e) => e.preventDefault());
+$("#emojiPanel").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-emoji]");
+  if (!b) return;
+  exec("insertText", b.dataset.emoji);
+  $("#emojiPanel").hidePopover();
+});
+
+// Popovers open next to the button that opened them, above it like Gmail's.
+for (const [pop, btn] of [["#sendMenu", "#sendMore"], ["#emojiPanel", "#btnEmoji"]]) {
+  $(pop).addEventListener("toggle", (e) => {
+    if (e.newState !== "open") return; // measured once open: a closed popover has no width
+    const r = $(btn).getBoundingClientRect();
+    $(pop).style.left = `${Math.max(8, Math.min(r.left, innerWidth - $(pop).offsetWidth - 8))}px`;
+    $(pop).style.bottom = `${innerHeight - r.top + 6}px`;
+  });
+}
+
+// The sending mailbox's signature lives in its own block, so changing From swaps it.
+function syncSignature() {
+  const mb = me.mailboxes.find((m) => m.id === Number($("#composeFrom").value));
+  let block = editor.querySelector(".wm-signature");
+  if (!mb?.signature) return block?.remove();
+  if (!editor.textContent.trim() && !block) editor.innerHTML = "<div><br></div>";
+  if (!block) {
+    block = document.createElement("div");
+    block.className = "wm-signature";
+    editor.append(document.createElement("br"), block);
+  }
+  block.innerHTML = `-- <br>${esc(mb.signature).replace(/\n/g, "<br>")}`;
+}
+$("#composeFrom").addEventListener("change", syncSignature);
+$("#btnSignature").addEventListener("mousedown", (e) => e.preventDefault());
+$("#btnSignature").addEventListener("click", () => {
+  const block = editor.querySelector(".wm-signature");
+  if (block) return block.remove();
+  if (!me.mailboxes.find((m) => m.id === Number($("#composeFrom").value))?.signature) {
+    return showSnackbar("Mailbox ini belum punya tanda tangan. Admin bisa mengaturnya di Pengaturan → Mailbox.");
+  }
+  syncSignature();
+});
+
+/* ---------- Schedule send ---------- */
+
+function schedulePresets() {
+  const at = (days, hour) => {
+    const t = new Date();
+    t.setDate(t.getDate() + days);
+    t.setHours(hour, 0, 0, 0);
+    return t;
+  };
+  const toMonday = (8 - new Date().getDay()) % 7 || 7;
+  return [["Besok pagi", at(1, 8)], ["Besok siang", at(1, 13)], ["Senin pagi", at(toMonday, 8)]];
+}
+
+const scheduleDialog = $("#scheduleDialog");
+$("#btnSchedule").addEventListener("click", () => {
+  $("#sendMenu").hidePopover();
+  $("#schedulePresets").innerHTML = schedulePresets().map(([label, t]) =>
+    `<button type="button" class="preset" data-at="${t.toISOString()}"><span>${label}</span><span class="muted">${esc(formatFullDate(t))}</span></button>`).join("");
+  const now = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+  $("#scheduleAt").min = now.toISOString().slice(0, 16);
+  $("#scheduleAt").value = "";
+  scheduleDialog.showModal();
+});
+$("#schedulePresets").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-at]");
+  if (!b) return;
+  scheduleDialog.close();
+  send(b.dataset.at);
+});
+$("#scheduleCustom").addEventListener("click", () => {
+  const t = new Date($("#scheduleAt").value);
+  if (isNaN(t) || t <= new Date()) return showSnackbar("Pilih tanggal dan waktu yang akan datang.");
+  scheduleDialog.close();
+  send(t.toISOString());
+});
+$("#scheduleCancel").addEventListener("click", () => scheduleDialog.close());
 
 const fileInput = $("#composeFileInput");
 $("#btnAttach").addEventListener("click", () => fileInput.click());
@@ -799,7 +961,10 @@ fileInput.addEventListener("change", (e) => {
 });
 
 const sendBtn = $("#sendBtn");
-sendBtn.addEventListener("click", async () => {
+sendBtn.addEventListener("click", () => send());
+
+// send delivers the composed message now, or at sendAt (ISO time) when scheduling.
+async function send(sendAt) {
   const to = $("#composeTo").value.trim();
   if (!to) {
     showSnackbar("Isi alamat penerima (Kepada).");
@@ -811,9 +976,14 @@ sendBtn.addEventListener("click", async () => {
   fd.append("from", $("#composeFrom").value);
   fd.append("to", to);
   fd.append("cc", $("#composeCc").value.trim());
+  fd.append("bcc", $("#composeBcc").value.trim());
   fd.append("subject", $("#composeSubject").value.trim());
-  fd.append("body", [$("#composeBody").value.trim(), quoteText.trim()].filter(Boolean).join("\n\n"));
+  const text = editor.innerText.trim();
+  fd.append("body", text);
+  fd.append("html", text ? editor.innerHTML.trim() : "");
+  fd.append("quote", quoteText.trim());
   fd.append("inReplyTo", $("#composeInReplyTo").value.trim());
+  if (sendAt) fd.append("sendAt", sendAt);
   for (const file of pendingAttachments) fd.append("attachments", file);
 
   sendBtn.disabled = true;
@@ -825,7 +995,7 @@ sendBtn.addEventListener("click", async () => {
     // Like Gmail, stay put: a reply shows up at the bottom of its conversation.
     const inline = $("#compose").classList.contains("is-inline");
     closeCompose();
-    showSnackbar("Pesan terkirim.");
+    showSnackbar(sendAt ? `Dijadwalkan: ${formatFullDate(sendAt)}. Lihat di Terjadwal.` : "Pesan terkirim.");
     apiGetStats();
     if (inline && openId) apiGetEmailDetail(openId);
     else apiGetEmails();
@@ -835,7 +1005,7 @@ sendBtn.addEventListener("click", async () => {
     sendBtn.disabled = false;
     sendBtn.innerHTML = `<span class="msf">send</span><span>Kirim</span>`;
   }
-});
+}
 
 /* ---------- Boot & Auto-Refresh ---------- */
 

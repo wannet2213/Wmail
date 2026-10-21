@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/mail"
@@ -194,8 +196,9 @@ func (a *API) SendEmail(w http.ResponseWriter, r *http.Request, u *models.User) 
 			http.Error(w, "failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		req.To, req.Cc, req.Subject = r.FormValue("to"), r.FormValue("cc"), r.FormValue("subject")
-		req.Body, req.InReplyTo = r.FormValue("body"), r.FormValue("inReplyTo")
+		req.To, req.Cc, req.Bcc, req.Subject = r.FormValue("to"), r.FormValue("cc"), r.FormValue("bcc"), r.FormValue("subject")
+		req.Body, req.HTML, req.Quote = r.FormValue("body"), r.FormValue("html"), r.FormValue("quote")
+		req.InReplyTo, req.SendAt = r.FormValue("inReplyTo"), r.FormValue("sendAt")
 		req.From, _ = strconv.ParseInt(r.FormValue("from"), 10, 64)
 		for _, fh := range r.MultipartForm.File["attachments"] {
 			f, err := fh.Open()
@@ -231,59 +234,151 @@ func (a *API) SendEmail(w http.ResponseWriter, r *http.Request, u *models.User) 
 		http.Error(w, "Alamat Cc tidak valid.", http.StatusBadRequest)
 		return
 	}
+	bccList, err := parseAddresses(req.Bcc)
+	if err != nil {
+		http.Error(w, "Alamat Bcc tidak valid.", http.StatusBadRequest)
+		return
+	}
+	var sendAt time.Time
+	if req.SendAt != "" {
+		if sendAt, err = time.Parse(time.RFC3339, req.SendAt); err != nil || !sendAt.After(time.Now()) {
+			http.Error(w, "Waktu jadwal tidak valid atau sudah lewat.", http.StatusBadRequest)
+			return
+		}
+	}
 	subject := strings.TrimSpace(req.Subject)
 	if subject == "" {
 		subject = "(no subject)"
 	}
-	body := strings.ReplaceAll(strings.TrimSpace(req.Body), "\r\n", "\n") // multipart forms send CRLF
-
-	inReplyTo := service.CleanMsgID(req.InReplyTo)
-	html := renderHTMLBody(body)
-
-	result, err := a.mailer.Send(service.SendOptions{
-		FromAddress: mb.Address,
-		FromName:    mb.DisplayName,
-		To:          toList,
-		Cc:          ccList,
-		Subject:     subject,
-		Text:        body,
-		HTML:        html,
-		InReplyTo:   inReplyTo,
-		Attachments: attachments,
-	})
-	if err != nil {
-		http.Error(w, "Gagal mengirim email: "+err.Error(), http.StatusBadGateway)
-		return
+	crlf := strings.NewReplacer("\r\n", "\n") // multipart forms send CRLF
+	body := strings.TrimSpace(crlf.Replace(req.Body))
+	quote := strings.TrimSpace(crlf.Replace(req.Quote))
+	html := strings.TrimSpace(req.HTML)
+	if html == "" {
+		html = renderHTMLBody(body)
+	}
+	text := body
+	if quote != "" {
+		text = strings.TrimSpace(body + "\n\n" + quote)
+		html += renderHTMLBody(quote)
 	}
 
-	sent := models.Email{
-		MailboxID:    mb.ID,
-		Provider:     result.Provider,
-		MessageID:    result.MessageID,
-		InReplyTo:    inReplyTo,
-		FromName:     mb.DisplayName,
-		FromEmail:    mb.Address,
-		ToRecipients: toList,
-		CcRecipients: ccList,
-		Subject:      subject,
-		Snippet:      service.CleanSnippet(body, 120),
-		BodyText:     body,
-		BodyHTML:     html,
-		Folder:       "sent",
-		CreatedAt:    time.Now(),
+	email := models.Email{
+		MailboxID:     mb.ID,
+		InReplyTo:     service.CleanMsgID(req.InReplyTo),
+		FromName:      mb.DisplayName,
+		FromEmail:     mb.Address,
+		ToRecipients:  toList,
+		CcRecipients:  ccList,
+		BccRecipients: bccList,
+		Subject:       subject,
+		Snippet:       service.CleanSnippet(body, 120),
+		BodyText:      text,
+		BodyHTML:      html,
+		Folder:        "sent",
+		CreatedAt:     time.Now(),
 	}
+	if !sendAt.IsZero() {
+		// Stored now, sent by RunScheduled when the time comes.
+		email.Folder, email.CreatedAt = "scheduled", sendAt
+	} else {
+		result, err := a.mailer.Send(sendOptions(&email, attachments))
+		if err != nil {
+			http.Error(w, "Gagal mengirim email: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		email.Provider, email.MessageID = result.Provider, result.MessageID
+	}
+
 	if err := os.MkdirAll(a.cfg.DataDir, 0750); err == nil {
 		for _, at := range attachments {
 			if saved, err := service.SaveAttachmentFile(a.cfg.DataDir, at.Filename, at.ContentType, at.Content); err == nil {
-				sent.Attachments = append(sent.Attachments, saved)
+				email.Attachments = append(email.Attachments, saved)
 			}
 		}
 	}
-	if err := a.db.SaveEmail(&sent); err != nil {
+	if err := a.db.SaveEmail(&email); err != nil {
 		http.Error(w, "Email terkirim tetapi gagal disimpan: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "provider": result.Provider, "email": sent})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "provider": email.Provider, "email": email})
+}
+
+func sendOptions(e *models.Email, attachments []service.MailAttachment) service.SendOptions {
+	return service.SendOptions{
+		FromAddress: e.FromEmail,
+		FromName:    e.FromName,
+		To:          e.ToRecipients,
+		Cc:          e.CcRecipients,
+		Bcc:         e.BccRecipients,
+		Subject:     e.Subject,
+		Text:        e.BodyText,
+		HTML:        e.BodyHTML,
+		InReplyTo:   e.InReplyTo,
+		Attachments: attachments,
+	}
+}
+
+// Unschedule cancels a scheduled message and returns it, so the client can reopen it.
+func (a *API) Unschedule(w http.ResponseWriter, r *http.Request, u *models.User) {
+	email, ok := a.emailFor(w, r, u, true)
+	if !ok {
+		return
+	}
+	if email.Folder != "scheduled" {
+		http.Error(w, "Email ini sudah tidak terjadwal.", http.StatusConflict)
+		return
+	}
+	if err := a.db.Unschedule(email.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, email)
+}
+
+// SendDue sends every scheduled message whose time has come. A failed one is retried
+// 10 minutes later and stays in Terjadwal, where its owner can cancel it.
+func (a *API) SendDue() {
+	ids, err := a.db.DueScheduled(time.Now())
+	if err != nil {
+		log.Printf("[JADWAL] gagal membaca antrean: %v", err)
+		return
+	}
+	for _, id := range ids {
+		e, err := a.db.GetEmail(id)
+		if err != nil {
+			continue
+		}
+		var atts []service.MailAttachment
+		for _, at := range e.Attachments {
+			if content, err := os.ReadFile(at.FilePath); err == nil {
+				atts = append(atts, service.MailAttachment{Filename: at.Filename, ContentType: at.ContentType, Content: content})
+			}
+		}
+		result, err := a.mailer.Send(sendOptions(e, atts))
+		if err != nil {
+			// ponytail: retries every 10 minutes for good; add a give-up limit if permanent failures pile up.
+			log.Printf("[JADWAL] email %d gagal dikirim, dicoba lagi 10 menit lagi: %v", id, err)
+			_ = a.db.Reschedule(id, time.Now().Add(10*time.Minute))
+			continue
+		}
+		if err := a.db.MarkSent(id, result.Provider, result.MessageID); err != nil {
+			log.Printf("[JADWAL] email %d terkirim tetapi gagal ditandai: %v", id, err)
+		}
+	}
+}
+
+func (a *API) RunScheduled(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		a.SendDue()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func (a *API) InboundRaw(w http.ResponseWriter, r *http.Request) {

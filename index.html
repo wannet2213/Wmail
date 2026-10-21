@@ -100,26 +100,67 @@
   <div class="compose-to">
     <span class="ms compose-mode" id="composeMode" aria-hidden="true">reply</span>
     <input id="composeTo" type="text" placeholder="Kepada" aria-label="Penerima">
-    <button class="iconbtn" id="btnCcToggle" aria-label="Tampilkan Cc"><span class="ms">keyboard_arrow_down</span></button>
+    <button type="button" class="text-toggle" data-show="composeCcRow" aria-label="Tambah penerima Cc">Cc</button>
+    <button type="button" class="text-toggle" data-show="composeBccRow" aria-label="Tambah penerima Bcc">Bcc</button>
   </div>
   <div class="compose-cc" id="composeCcRow" hidden>
     <input id="composeCc" type="text" placeholder="Cc" aria-label="Penerima Cc">
   </div>
+  <div class="compose-cc" id="composeBccRow" hidden>
+    <input id="composeBcc" type="text" placeholder="Bcc (tidak terlihat penerima lain)" aria-label="Penerima Bcc">
+  </div>
   <input id="composeSubject" class="compose-subject" type="text" placeholder="Subjek" aria-label="Subjek">
   <input type="hidden" id="composeInReplyTo" value="">
-  <textarea id="composeBody" class="compose-body" aria-label="Isi pesan"></textarea>
+  <div id="composeBody" class="compose-body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Isi pesan"></div>
   <button type="button" class="quote-toggle" id="btnQuote" aria-label="Tampilkan teks yang dikutip" aria-expanded="false" hidden><span aria-hidden="true">•••</span></button>
   <div id="composeQuote" class="compose-quote" aria-label="Teks yang dikutip" hidden></div>
   <div class="compose-attachments" id="composeAttachments" hidden></div>
   <input type="file" id="composeFileInput" multiple hidden>
+  <div class="format-bar" id="formatBar" role="toolbar" aria-label="Format teks" hidden>
+    <button type="button" data-cmd="bold" aria-label="Tebal (Ctrl+B)"><b>B</b></button>
+    <button type="button" data-cmd="italic" aria-label="Miring (Ctrl+I)"><i>I</i></button>
+    <button type="button" data-cmd="underline" aria-label="Garis bawah (Ctrl+U)"><u>U</u></button>
+    <button type="button" data-cmd="strikeThrough" aria-label="Coret"><s>S</s></button>
+    <span class="format-sep" aria-hidden="true"></span>
+    <button type="button" data-cmd="insertUnorderedList" aria-label="Daftar berpoin">•&#x2009;—</button>
+    <button type="button" data-cmd="insertOrderedList" aria-label="Daftar bernomor">1.&#x2009;—</button>
+    <button type="button" data-cmd="formatBlock" data-arg="blockquote" aria-label="Kutipan">❝</button>
+    <span class="format-sep" aria-hidden="true"></span>
+    <button type="button" data-cmd="removeFormat" aria-label="Hapus format"><s>T</s><sub>x</sub></button>
+  </div>
   <footer class="compose-foot">
-    <button class="send-btn" id="sendBtn"><span class="msf">send</span><span>Kirim</span></button>
+    <span class="send-split">
+      <button class="send-btn" id="sendBtn"><span class="msf">send</span><span>Kirim</span></button>
+      <button class="send-more" id="sendMore" popovertarget="sendMenu" aria-label="Opsi kirim lainnya"><span class="ms">expand_more</span></button>
+    </span>
+    <button class="iconbtn fmt-toggle" id="btnFormat" aria-label="Opsi format" aria-pressed="false"><span aria-hidden="true">Aa</span></button>
     <button class="iconbtn" id="btnAttach" aria-label="Lampirkan file"><span class="ms">attach_file</span></button>
+    <button class="iconbtn" id="btnLink" aria-label="Sisipkan link"><span class="ms">link</span></button>
+    <button class="iconbtn" id="btnEmoji" popovertarget="emojiPanel" aria-label="Sisipkan emoji"><span class="ms">mood</span></button>
+    <button class="iconbtn" id="btnSignature" aria-label="Sisipkan tanda tangan"><span class="ms">create</span></button>
     <span class="compose-foot-end">
       <button class="iconbtn" id="composeDiscard" aria-label="Buang draf"><span class="ms">delete</span></button>
     </span>
   </footer>
 </section>
+
+<div id="sendMenu" class="pop-menu" popover>
+  <button class="account-item" id="btnSchedule"><span class="ms">schedule</span>Jadwalkan pengiriman</button>
+</div>
+<div id="emojiPanel" class="pop-menu emoji-panel" popover aria-label="Emoji"></div>
+
+<dialog id="scheduleDialog" class="schedule-dialog" aria-labelledby="scheduleTitle">
+  <h2 id="scheduleTitle">Jadwalkan pengiriman</h2>
+  <div id="schedulePresets"></div>
+  <div class="settings-field">
+    <label for="scheduleAt">Pilih tanggal &amp; waktu</label>
+    <input class="settings-input" id="scheduleAt" type="datetime-local">
+  </div>
+  <div class="dialog-actions">
+    <button type="button" class="text-btn" id="scheduleCancel">Batal</button>
+    <button type="button" class="send-btn" id="scheduleCustom">Jadwalkan</button>
+  </div>
+</dialog>
 
 <div class="snackbar" id="snackbar" role="status" hidden>
   <span id="snackText"></span>

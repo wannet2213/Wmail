@@ -13,6 +13,7 @@ type Email struct {
 	FromEmail      string       `json:"fromEmail"`
 	ToRecipients   []string     `json:"toRecipients"`
 	CcRecipients   []string     `json:"ccRecipients,omitempty"`
+	BccRecipients  []string     `json:"bccRecipients,omitempty"`
 	Subject        string       `json:"subject"`
 	Snippet        string       `json:"snippet"`
 	BodyText       string       `json:"bodyText"`
@@ -45,9 +46,12 @@ type Attachment struct {
 type SendRequest struct {
 	To        string `json:"to"`
 	Cc        string `json:"cc,omitempty"`
+	Bcc       string `json:"bcc,omitempty"`
 	Subject   string `json:"subject"`
-	Body      string `json:"body"`
-	IsHTML    bool   `json:"isHtml"`
+	Body      string `json:"body"`             // plain text of what was written
+	HTML      string `json:"html,omitempty"`   // the same, formatted; built from Body when empty
+	Quote     string `json:"quote,omitempty"`  // quoted reply or forwarded message, "> " lines
+	SendAt    string `json:"sendAt,omitempty"` // RFC 3339; empty sends now
 	InReplyTo string `json:"inReplyTo,omitempty"`
 	From      int64  `json:"from"` // mailbox id
 }
@@ -80,6 +84,7 @@ type Mailbox struct {
 	ID          int64  `json:"id"`
 	Address     string `json:"address"`
 	DisplayName string `json:"displayName"`
+	Signature   string `json:"signature"`
 	CanSend     bool   `json:"canSend"` // per-user view; admins always true
 }
 

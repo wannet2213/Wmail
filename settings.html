@@ -51,12 +51,9 @@
 
   <section id="secMailboxes" hidden>
     <h2>Mailbox</h2>
-    <p class="muted">Hanya alamat yang terdaftar di sini yang menerima email; alamat lain ditolak.</p>
+    <p class="muted">Hanya alamat yang terdaftar di sini yang menerima email; alamat lain ditolak. Buka alamat untuk mengubah nama pengirim dan tanda tangannya.</p>
     <input class="settings-input list-filter" id="mbFilter" type="search" placeholder="Cari alamat" aria-label="Cari mailbox">
-    <div class="table-wrap scroll-list"><table class="data-table">
-      <thead><tr><th>Alamat</th><th>Nama pengirim</th><th></th></tr></thead>
-      <tbody id="mbBody"></tbody>
-    </table></div>
+    <div class="scroll-list" id="mbList"></div>
     <form class="inline-form" id="mbForm">
       <div class="settings-field"><label for="newAddress">Alamat</label>
         <div class="settings-input-group">

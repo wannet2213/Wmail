@@ -175,29 +175,37 @@ $("#userForm").addEventListener("submit", (e) => {
 
 /* ---------- admin: mailboxes ---------- */
 
+// One folded line per mailbox; opening it edits the sender name and signature.
 function renderMailboxes() {
-  $("#mbBody").innerHTML = data.mailboxes.length ? data.mailboxes.map((m) => `
-    <tr data-filter="${esc(lc(m.address + " " + m.displayName))}">
-      <td>${esc(m.address)}</td>
-      <td><input class="settings-input" data-name-for="${m.id}" value="${esc(m.displayName)}" aria-label="Nama pengirim ${esc(m.address)}"></td>
-      <td><div class="row-btns">
-        <button class="text-btn" data-act="mb-save" data-id="${m.id}">Simpan</button>
-        <button class="text-btn danger" data-act="mb-del" data-id="${m.id}">Hapus</button>
-      </div></td>
-    </tr>`).join("")
-    : `<tr data-filter=""><td colspan="3" class="muted">Belum ada mailbox. Tambahkan alamat pertama di bawah.</td></tr>`;
-  filterList($("#mbFilter"), $("#mbBody").children);
+  const el = $("#mbList");
+  const open = new Set([...el.querySelectorAll("details[open]")].map((d) => d.dataset.mb));
+  el.innerHTML = data.mailboxes.length ? data.mailboxes.map((m) => `
+    <details class="user-item" data-mb="${m.id}" data-filter="${esc(lc(m.address + " " + m.displayName))}" ${open.has(String(m.id)) ? "open" : ""}>
+      <summary><strong>${esc(m.address)}</strong>${m.displayName ? ` <span class="muted">· ${esc(m.displayName)}</span>` : ""}</summary>
+      <div class="user-body">
+        <div class="settings-field"><label for="mbName${m.id}">Nama pengirim</label>
+          <input class="settings-input" id="mbName${m.id}" value="${esc(m.displayName)}" placeholder="Nama yang tampil di penerima"></div>
+        <div class="settings-field"><label for="mbSig${m.id}">Tanda tangan</label>
+          <textarea class="settings-input sig-input" id="mbSig${m.id}" rows="3" placeholder="Disisipkan otomatis di bawah email yang ditulis dari alamat ini">${esc(m.signature)}</textarea></div>
+        <div class="row-btns">
+          <button class="text-btn" data-act="mb-save" data-id="${m.id}">Simpan</button>
+          <button class="text-btn danger" data-act="mb-del" data-id="${m.id}">Hapus mailbox</button>
+        </div>
+      </div>
+    </details>`).join("")
+    : `<p class="muted" data-filter="">Belum ada mailbox. Tambahkan alamat pertama di bawah.</p>`;
+  filterList($("#mbFilter"), el.children);
 }
 
-$("#mbFilter").addEventListener("input", () => filterList($("#mbFilter"), $("#mbBody").children));
+$("#mbFilter").addEventListener("input", () => filterList($("#mbFilter"), $("#mbList").children));
 
-$("#mbBody").addEventListener("click", (e) => {
+$("#mbList").addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]");
   if (!b) return;
   const m = data.mailboxes.find((x) => x.id === Number(b.dataset.id));
   if (b.dataset.act === "mb-save") {
-    const displayName = document.querySelector(`[data-name-for="${m.id}"]`).value;
-    run(() => api(`/api/admin/mailboxes/${m.id}`, "PATCH", { displayName }), "Nama pengirim disimpan.");
+    const body = { displayName: $(`#mbName${m.id}`).value, signature: $(`#mbSig${m.id}`).value };
+    run(async () => { await api(`/api/admin/mailboxes/${m.id}`, "PATCH", body); await loadAdmin(); }, "Mailbox disimpan.");
   } else if (b.dataset.act === "mb-del" && confirm(`Hapus ${m.address} beserta SEMUA emailnya? Tidak bisa dibatalkan.`)) {
     run(async () => { await api(`/api/admin/mailboxes/${m.id}`, "DELETE"); await loadAdmin(); }, "Mailbox dihapus.");
   }

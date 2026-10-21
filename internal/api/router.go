@@ -28,6 +28,7 @@ func SetupRouter(a *API, web fs.FS) http.Handler {
 	mux.Handle("DELETE /api/emails/{id}", a.auth(a.DeleteEmail))
 	mux.Handle("POST /api/emails/send", a.auth(a.SendEmail))
 	mux.Handle("POST /api/emails/empty-trash", a.auth(a.EmptyTrash))
+	mux.Handle("POST /api/emails/{id}/unschedule", a.auth(a.Unschedule))
 	mux.Handle("GET /api/attachments/{id}", a.auth(a.GetAttachment))
 
 	mux.Handle("GET /api/admin/overview", a.admin(a.AdminOverview))

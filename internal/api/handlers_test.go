@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"wmail/internal/api"
 	"wmail/internal/config"
@@ -24,6 +26,7 @@ const pw = "rahasia-123"
 
 type env struct {
 	db     *db.DB
+	api    *api.API
 	router http.Handler
 	mbA    int64 // bob: receive only
 	mbB    int64 // bob: no access
@@ -54,7 +57,8 @@ func setup(t *testing.T) *env {
 	_ = d.SetSetting("inbound_secret", "s3cret")
 
 	web := fstest.MapFS{"index.html": {Data: []byte("<html>wmail</html>")}}
-	return &env{db: d, router: api.SetupRouter(api.NewAPI(cfg, d), web), mbA: a, mbB: b}
+	a2 := api.NewAPI(cfg, d)
+	return &env{db: d, api: a2, router: api.SetupRouter(a2, web), mbA: a, mbB: b}
 }
 
 func (e *env) do(t *testing.T, cookie *http.Cookie, method, path string, body any) *httptest.ResponseRecorder {
@@ -397,5 +401,57 @@ func TestReceiveOnlyGrantIsReadOnly(t *testing.T) {
 	}
 	if rec := e.do(t, bob, "DELETE", id, nil); rec.Code != 200 {
 		t.Fatalf("delete from trash: %d", rec.Code)
+	}
+}
+
+func TestScheduledSend(t *testing.T) {
+	e := setup(t)
+	var sent []map[string]any
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got map[string]any
+		json.NewDecoder(r.Body).Decode(&got)
+		sent = append(sent, got)
+		w.Write([]byte(`{"id":"abc"}`))
+	}))
+	defer fake.Close()
+	service.ResendURL = fake.URL
+	e.db.SetSetting("resend_api_key", "re_test")
+	root := e.login(t, "root")
+
+	send := func(sendAt string) *httptest.ResponseRecorder {
+		return e.do(t, root, "POST", "/api/emails/send", map[string]any{
+			"from": e.mbA, "to": "dest@example.com", "bcc": "diam@example.com", "subject": "Nanti",
+			"body": "Halo", "html": "<p><b>Halo</b></p>", "sendAt": sendAt,
+		})
+	}
+	if rec := send(time.Now().Add(-time.Minute).Format(time.RFC3339)); rec.Code != 400 {
+		t.Fatalf("a time in the past must be refused, got %d", rec.Code)
+	}
+	if rec := send(time.Now().Add(time.Hour).Format(time.RFC3339)); rec.Code != 200 {
+		t.Fatalf("schedule: %d %s", rec.Code, rec.Body)
+	}
+	list, _, _ := e.db.ListEmails(e.mbA, "scheduled", "", 50, 0)
+	if len(sent) != 0 || len(list) != 1 {
+		t.Fatalf("scheduled mail must wait: sent %d, Terjadwal %d", len(sent), len(list))
+	}
+
+	e.api.SendDue() // not due yet
+	_ = e.db.Reschedule(list[0].ID, time.Now().Add(-time.Second))
+	e.api.SendDue()
+	if len(sent) != 1 || sent[0]["html"] != "<p><b>Halo</b></p>" || fmt.Sprint(sent[0]["bcc"]) != "[diam@example.com]" {
+		t.Fatalf("due mail not sent as written: %v", sent)
+	}
+	if list, _, _ = e.db.ListEmails(e.mbA, "sent", "", 50, 0); len(list) != 1 || list[0].MessageID != "<abc@resend>" {
+		t.Fatalf("sent mail should leave Terjadwal for Terkirim: %+v", list)
+	}
+
+	// Cancelling hands the message back and removes it.
+	send(time.Now().Add(time.Hour).Format(time.RFC3339))
+	list, _, _ = e.db.ListEmails(e.mbA, "scheduled", "", 50, 0)
+	if rec := e.do(t, root, "POST", "/api/emails/"+itoa(list[0].ID)+"/unschedule", nil); rec.Code != 200 {
+		t.Fatalf("unschedule: %d %s", rec.Code, rec.Body)
+	}
+	if list, _, _ = e.db.ListEmails(e.mbA, "scheduled", "", 50, 0); len(list) != 0 {
+		t.Fatalf("cancelled mail still scheduled: %+v", list)
 	}
 }

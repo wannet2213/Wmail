@@ -127,6 +127,7 @@ func (c *ctx) serve() error {
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go a.Inbound().RunKVDrain(sigCtx, 5*time.Minute)
+	go a.RunScheduled(sigCtx, 30*time.Second)
 
 	log.Printf("Wmail berjalan di http://localhost:%s (db: %s)", c.cfg.Port, c.cfg.DBPath)
 	if c.db.CountAdmins() == 0 {

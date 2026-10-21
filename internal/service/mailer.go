@@ -38,6 +38,7 @@ type SendOptions struct {
 	FromName    string
 	To          []string
 	Cc          []string
+	Bcc         []string // envelope only: never written into the headers
 	Subject     string
 	Text        string
 	HTML        string
@@ -173,6 +174,9 @@ func (m *Mailer) sendViaResend(apiKey string, opts SendOptions) (*SendResult, er
 	if len(opts.Cc) > 0 {
 		payload["cc"] = opts.Cc
 	}
+	if len(opts.Bcc) > 0 {
+		payload["bcc"] = opts.Bcc
+	}
 	if opts.InReplyTo != "" {
 		payload["headers"] = map[string]string{"In-Reply-To": opts.InReplyTo, "References": opts.InReplyTo}
 	}
@@ -238,7 +242,7 @@ func sendViaSES(s map[string]string, opts SendOptions) (*SendResult, error) {
 		return nil, err
 	}
 	auth := smtp.PlainAuth("", s["aws_access_key_id"], SESSMTPPassword(s["aws_secret_access_key"], region), host)
-	if err := smtp.SendMail(host+":587", auth, opts.FromAddress, append(append([]string{}, opts.To...), opts.Cc...), raw); err != nil {
+	if err := smtp.SendMail(host+":587", auth, opts.FromAddress, append(append(append([]string{}, opts.To...), opts.Cc...), opts.Bcc...), raw); err != nil {
 		return nil, fmt.Errorf("SES SMTP: %w", err)
 	}
 	return &SendResult{Provider: "ses", MessageID: msgID}, nil
