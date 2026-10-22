@@ -355,10 +355,10 @@ func TestCopyToPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dst.Close()
-	if err := src.CopyTo(dst); err != nil {
+	if err := src.CopyTo(dst, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := src.CopyTo(dst); err == nil {
+	if err := src.CopyTo(dst, false); err == nil {
 		t.Fatal("copied twice into the same database")
 	}
 

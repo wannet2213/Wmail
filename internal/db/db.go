@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +24,7 @@ import (
 
 	"wmail/internal/models"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -48,6 +52,12 @@ func InitDB(dsn string) (*DB, error) {
 	var conn *sql.DB
 	var err error
 	if pg {
+		if host, err := plaintextRemote(dsn); err != nil {
+			return nil, err
+		} else if host != "" {
+			return nil, fmt.Errorf("koneksi PostgreSQL ke %s bisa berjalan tanpa enkripsi: tambahkan sslmode=verify-full ke URL "+
+				"(sslmode=require juga diterima: terenkripsi, tapi sertifikat server tidak diperiksa)", host)
+		}
 		conn, err = sql.Open("pgx", dsn)
 	} else {
 		if err := os.MkdirAll(filepath.Dir(dsn), 0755); err != nil {
@@ -75,6 +85,24 @@ func InitDB(dsn string) (*DB, error) {
 
 func (d *DB) Close() error {
 	return d.conn.Close()
+}
+
+// plaintextRemote returns a host outside this machine that the connection could reach without
+// TLS. pgx's default sslmode=prefer falls back to plaintext when TLS fails, and anyone on the
+// network path can make it fail.
+func plaintextRemote(dsn string) (string, error) {
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return "", err
+	}
+	tries := append([]*pgconn.FallbackConfig{{Host: cfg.Host, TLSConfig: cfg.TLSConfig}}, cfg.Fallbacks...)
+	for _, t := range tries {
+		local := strings.HasPrefix(t.Host, "/") || t.Host == "localhost" || net.ParseIP(t.Host).IsLoopback()
+		if t.TLSConfig == nil && !local {
+			return t.Host, nil
+		}
+	}
+	return "", nil
 }
 
 // sqlDB and sqlTx let every query be written once with ? placeholders: on Postgres
@@ -1354,16 +1382,16 @@ func (d *DB) ListGrants() ([]models.Grant, error) {
 	return list, rows.Err()
 }
 
-/* ---------- moving to PostgreSQL ---------- */
+/* ---------- copies and snapshots ---------- */
 
 // copyOrder lists the tables parents first, so foreign keys hold at every insert.
 var copyOrder = []string{"users", "mailboxes", "user_mailboxes", "sessions", "settings", "emails", "attachments"}
 
-// CopyTo copies every row into dst, an empty PostgreSQL database, in one transaction:
-// a failure leaves dst empty. The source is read from one snapshot. Attachment files
-// stay on disk where their rows point.
-func (d *DB) CopyTo(dst *DB) error {
-	src, err := d.conn.Begin()
+// CopyTo copies every row into dst, SQLite or PostgreSQL, in one transaction: a failure
+// leaves dst as it was. dst must be empty unless replace is set, which deletes its rows
+// first. The source is read from one snapshot. Attachment files stay where rows point.
+func (d *DB) CopyTo(dst *DB, replace bool) error {
+	src, err := d.beginSnapshot()
 	if err != nil {
 		return err
 	}
@@ -1374,6 +1402,13 @@ func (d *DB) CopyTo(dst *DB) error {
 	}
 	defer tx.Rollback()
 
+	if replace {
+		for _, table := range slices.Backward(copyOrder) {
+			if _, err := tx.Exec("DELETE FROM " + table); err != nil {
+				return err
+			}
+		}
+	}
 	for _, table := range copyOrder {
 		var n int
 		if err := tx.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
@@ -1382,11 +1417,15 @@ func (d *DB) CopyTo(dst *DB) error {
 		if n > 0 {
 			return fmt.Errorf("tabel %s di database tujuan tidak kosong", table)
 		}
-		rows, err := src.Query("SELECT * FROM " + table)
+		// Only the columns both sides have: Postgres adds a generated search column.
+		cols, err := sharedColumns(src, tx, table)
 		if err != nil {
 			return err
 		}
-		cols, _ := rows.Columns()
+		rows, err := src.Query("SELECT " + strings.Join(cols, ", ") + " FROM " + table)
+		if err != nil {
+			return err
+		}
 		insert := "INSERT INTO " + table + " (" + strings.Join(cols, ", ") + ") VALUES (?" + strings.Repeat(", ?", len(cols)-1) + ")"
 		vals, ptrs := make([]any, len(cols)), make([]any, len(cols))
 		for i := range vals {
@@ -1407,13 +1446,80 @@ func (d *DB) CopyTo(dst *DB) error {
 			return fmt.Errorf("%s: %w", table, err)
 		}
 	}
-	// Rows kept their ids, so new rows must be numbered after them.
-	for _, table := range []string{"users", "mailboxes", "emails"} {
-		if _, err := tx.Exec(`SELECT setval(pg_get_serial_sequence('` + table + `', 'id'), COALESCE(MAX(id), 0) + 1, false) FROM ` + table); err != nil {
-			return err
+	if dst.conn.pg {
+		// Rows kept their ids, so new rows must be numbered after them.
+		for _, table := range []string{"users", "mailboxes", "emails"} {
+			if _, err := tx.Exec(`SELECT setval(pg_get_serial_sequence('` + table + `', 'id'), COALESCE(MAX(id), 0) + 1, false) FROM ` + table); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
+}
+
+// beginSnapshot starts a transaction whose reads all see the database at one moment.
+func (d *DB) beginSnapshot() (*sqlTx, error) {
+	if !d.conn.pg {
+		return d.conn.Begin() // in WAL mode a SQLite read transaction already does
+	}
+	tx, err := d.conn.DB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	return &sqlTx{tx, true}, err
+}
+
+func sharedColumns(a, b *sqlTx, table string) ([]string, error) {
+	columns := func(t *sqlTx) ([]string, error) {
+		rows, err := t.Query("SELECT * FROM " + table + " LIMIT 0")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return rows.Columns()
+	}
+	ac, err := columns(a)
+	if err != nil {
+		return nil, err
+	}
+	bc, err := columns(b)
+	return slices.DeleteFunc(ac, func(c string) bool { return !slices.Contains(bc, c) }), err
+}
+
+// Snapshot writes a consistent copy of the whole database, SQLite or PostgreSQL, to a new
+// SQLite file at path.
+func (d *DB) Snapshot(path string) error {
+	if !d.conn.pg {
+		_, err := d.conn.Exec("VACUUM INTO ?", path)
+		return err
+	}
+	snap, err := InitDB(path)
+	if err != nil {
+		return err
+	}
+	defer snap.Close()
+	return d.CopyTo(snap, false)
+}
+
+// AttachmentPaths maps every attachment id to its file on disk.
+func (d *DB) AttachmentPaths() (map[string]string, error) {
+	rows, err := d.conn.Query("SELECT id, file_path FROM attachments")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	paths := map[string]string{}
+	for rows.Next() {
+		var id, path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return nil, err
+		}
+		paths[id] = path
+	}
+	return paths, rows.Err()
+}
+
+// MoveAttachments points every attachment row at dir/<id>, the name SaveAttachmentFile gives files.
+func (d *DB) MoveAttachments(dir string) error {
+	_, err := d.conn.Exec("UPDATE attachments SET file_path = ? || id", filepath.Clean(dir)+string(filepath.Separator))
+	return err
 }
 
 func boolToInt(b bool) int {
@@ -1447,6 +1553,7 @@ var SettingKeys = []SettingKey{
 	{Key: "cf_kv_namespace_id", Desc: "KV namespace antrean cadangan"},
 	{Key: "cf_tunnel_id", Desc: "Cloudflare Tunnel id"},
 	{Key: "cf_tunnel_token", Desc: "Token cloudflared", Secret: true},
+	{Key: "backup_recipient", Desc: "Kunci publik age untuk backup (age1...); buat dengan: wmail backup key"},
 }
 
 func LookupSettingKey(key string) (SettingKey, bool) {

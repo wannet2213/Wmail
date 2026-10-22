@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"wmail/internal/api"
+	"wmail/internal/backup"
 	"wmail/internal/config"
 	"wmail/internal/db"
 	"wmail/internal/service"
@@ -59,6 +61,11 @@ Konfigurasi
   cloudflare setup                      buat KV, Tunnel, Worker, Email Routing otomatis
   resend setup                          daftarkan domain di Resend + pasang DNS di Cloudflare
   test-send <dari-alamat> <ke-alamat>   kirim email uji lewat provider aktif
+
+Backup (terenkripsi dengan age; server hanya menyimpan kunci publik)
+  backup key                            buat kunci backup; kunci rahasia tampil sekali, simpan di luar server
+  backup > file.tar.gz.age              backup database + lampiran ke stdout
+  restore < file.tar.gz.age             GANTI semua data dengan isi backup (kunci rahasia ditanya)
 
 Database
   db copy-to [postgres://...]           salin semua data SQLite ke PostgreSQL kosong (URL kosong = ditanya tersembunyi)
@@ -105,6 +112,10 @@ func Run(args []string, assets Assets) error {
 		}
 	case "test-send":
 		return c.testSend(args)
+	case "backup":
+		return c.backup(args)
+	case "restore":
+		return c.restore(args)
 	case "db":
 		if len(args) > 0 && args[0] == "copy-to" {
 			return c.copyTo(args[1:])
@@ -356,6 +367,79 @@ func (c *ctx) config(args []string) error {
 }
 
 // copyTo moves everything from the SQLite file into an empty PostgreSQL database.
+// backup streams an encrypted backup to stdout; `backup key` makes the key pair it needs.
+func (c *ctx) backup(args []string) error {
+	if len(args) == 1 && args[0] == "key" {
+		return c.backupKey()
+	}
+	if len(args) > 0 || term.IsTerminal(int(os.Stdout.Fd())) {
+		return errors.New("pakai: sudo wmail backup > wmail-$(date +%F).tar.gz.age")
+	}
+	key := c.db.GetSetting("backup_recipient")
+	if key == "" {
+		return errors.New("belum ada kunci backup, buat dulu: sudo wmail backup key")
+	}
+	if err := backup.Write(os.Stdout, c.db, key, filepath.Dir(c.cfg.DBPath)); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "✓ Backup selesai, terenkripsi untuk "+key)
+	return nil
+}
+
+func (c *ctx) backupKey() error {
+	if old := c.db.GetSetting("backup_recipient"); old != "" &&
+		!confirm("Sudah ada kunci backup "+old+". Ganti? (backup lama tetap butuh kunci rahasia lamanya)", false) {
+		return nil
+	}
+	secret, public, err := backup.NewKey()
+	if err != nil {
+		return err
+	}
+	if err := c.db.SetSetting("backup_recipient", public); err != nil {
+		return err
+	}
+	fmt.Println("Kunci rahasia backup. Simpan di luar server, mis. di password manager: server tidak menyimpannya,")
+	fmt.Println("dan tanpa kunci ini backup tidak bisa dibuka.")
+	fmt.Println("\n" + secret + "\n")
+	fmt.Println("Kunci publik " + public + " disimpan sebagai backup_recipient.")
+	return nil
+}
+
+// restore reads a backup from stdin and asks for the secret key on the terminal.
+func (c *ctx) restore(args []string) error {
+	if len(args) > 0 || term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("pakai: sudo wmail restore < wmail-2026-10-22.tar.gz.age")
+	}
+	host := c.cfg.BindAddr
+	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, c.cfg.Port), time.Second); err == nil {
+		conn.Close()
+		return errors.New("Wmail masih berjalan, hentikan dulu: sudo systemctl stop wmail")
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return errors.New("restore perlu terminal untuk menanyakan kunci rahasia")
+	}
+	defer tty.Close()
+	fmt.Fprint(tty, "Restore MENGGANTI semua data Wmail (akun, mailbox, email, setting) dengan isi backup.\nKetik 'ganti' untuk lanjut: ")
+	if answer, _ := bufio.NewReader(tty).ReadString('\n'); strings.TrimSpace(answer) != "ganti" {
+		return errors.New("dibatalkan")
+	}
+	fmt.Fprint(tty, "Kunci rahasia backup (AGE-SECRET-KEY-1...): ")
+	secret, err := term.ReadPassword(int(tty.Fd()))
+	fmt.Fprintln(tty)
+	if err != nil {
+		return err
+	}
+	if err := backup.Restore(os.Stdin, strings.TrimSpace(string(secret)), c.db, c.cfg.DataDir); err != nil {
+		return err
+	}
+	fmt.Fprintln(tty, "✓ Data dipulihkan. Jalankan sudo ./install.sh untuk menyalakan Wmail lagi (dan cloudflared dengan token dari backup).")
+	return nil
+}
+
 // The URL is asked when not given, so its password stays out of ps and shell history.
 func (c *ctx) copyTo(args []string) error {
 	var url string
@@ -376,7 +460,7 @@ func (c *ctx) copyTo(args []string) error {
 	}
 	defer dst.Close()
 	fmt.Println("Menyalin " + c.cfg.DBPath + " ke PostgreSQL ...")
-	if err := c.db.CopyTo(dst); err != nil {
+	if err := c.db.CopyTo(dst, false); err != nil {
 		return err
 	}
 	fmt.Println("✓ Selesai. Tambahkan DATABASE_URL=<url tadi> ke file env (server: /etc/wmail/wmail.env),")

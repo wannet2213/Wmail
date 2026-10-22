@@ -74,6 +74,7 @@ wmail grant <user> <alamat> [--send]     wmail revoke <user> <alamat>
 wmail config set <key> [nilai]           wmail config show | get <key>
 wmail cloudflare setup                   wmail resend setup
 wmail test-send <dari> <ke>              wmail setup
+wmail backup key | backup > file.age     wmail restore < file.age
 ```
 
 Contoh: `sudo wmail config set resend_api_key` meminta key secara tersembunyi.
@@ -82,6 +83,9 @@ Contoh: `sudo wmail config set resend_api_key` meminta key secara tersembunyi.
 
 Default-nya SQLite (`DB_PATH`), tanpa server tambahan. PostgreSQL 12+ dipakai bila
 `DATABASE_URL=postgres://user:password@host:5432/nama_db` diisi di `/etc/wmail/wmail.env`.
+Server PostgreSQL di mesin lain wajib lewat TLS: tambahkan `?sslmode=verify-full` (atau
+`sslmode=require`, terenkripsi tanpa memeriksa sertifikat). Tanpa itu Wmail menolak start,
+karena bawaan driver-nya diam-diam beralih ke koneksi tanpa enkripsi bila TLS gagal.
 
 Pindah dari SQLite ke PostgreSQL: jalankan `sudo ./install.sh` dan jawab `y` di langkah
 *Database*. Installer bisa memasang PostgreSQL di server ini (apt untuk Debian/Ubuntu, dnf untuk
@@ -96,6 +100,29 @@ Lampiran tetap di `DATA_DIR`. File SQLite tidak diubah: hapus `DATABASE_URL` unt
 ke SQLite (data yang masuk selama memakai PostgreSQL tidak ikut). Bedanya di PostgreSQL:
 pencarian tidak mengabaikan aksen ("kafe" tidak menemukan "café") dan hanya 200.000
 karakter pertama tiap email yang terindeks.
+
+## Backup
+
+Backup berisi database (selalu sebagai file SQLite, juga bila memakai PostgreSQL) dan semua
+lampiran, dienkripsi dengan [age](https://age-encryption.org) ke sebuah kunci publik. Server
+hanya menyimpan kunci publik itu, jadi backup yang bocor, atau server yang dibobol, tidak
+membuka backup lama. Kunci rahasianya Anda yang simpan.
+
+```bash
+sudo wmail backup key                                   # sekali; simpan kunci rahasia yang tampil
+sudo wmail backup > wmail-$(date +%F).tar.gz.age        # bisa dijadwalkan lewat cron
+```
+
+Memulihkan (di server lama atau baru; semua data saat ini DIGANTI isi backup):
+
+```bash
+sudo systemctl stop wmail
+sudo wmail restore < wmail-2026-10-22.tar.gz.age        # kunci rahasia ditanya tersembunyi
+sudo ./install.sh                                       # nyalakan lagi, cloudflared memakai token dari backup
+```
+
+Tanpa Wmail: `age -d -i kunci.txt wmail-….tar.gz.age | tar xz` mengeluarkan `mail.db`
+dan folder `attachments/`.
 
 ## Development
 
