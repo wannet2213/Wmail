@@ -13,7 +13,16 @@ type Config struct {
 	Port     string
 	BindAddr string // 127.0.0.1 = only cloudflared reaches the app; 0.0.0.0 opens it to the LAN
 	DBPath   string
+	DBURL    string // postgres://… replaces the SQLite file at DBPath when set
 	DataDir  string
+}
+
+// DSN is what db.InitDB opens.
+func (c *Config) DSN() string {
+	if c.DBURL != "" {
+		return c.DBURL
+	}
+	return c.DBPath
 }
 
 func LoadConfig() *Config {
@@ -22,6 +31,7 @@ func LoadConfig() *Config {
 		Port:     getEnv("PORT", "8080"),
 		BindAddr: getEnv("BIND_ADDR", "127.0.0.1"),
 		DBPath:   getEnv("DB_PATH", "./data/mail.db"),
+		DBURL:    getEnv("DATABASE_URL", ""),
 		DataDir:  getEnv("DATA_DIR", "./data/attachments"),
 	}
 }

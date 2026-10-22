@@ -59,6 +59,9 @@ Konfigurasi
   cloudflare setup                      buat KV, Tunnel, Worker, Email Routing otomatis
   resend setup                          daftarkan domain di Resend + pasang DNS di Cloudflare
   test-send <dari-alamat> <ke-alamat>   kirim email uji lewat provider aktif
+
+Database
+  db copy-to [postgres://...]           salin semua data SQLite ke PostgreSQL kosong (URL kosong = ditanya tersembunyi)
 `
 
 func Run(args []string, assets Assets) error {
@@ -72,7 +75,7 @@ func Run(args []string, assets Assets) error {
 	}
 
 	cfg := config.LoadConfig()
-	d, err := db.InitDB(cfg.DBPath)
+	d, err := db.InitDB(cfg.DSN())
 	if err != nil {
 		return err
 	}
@@ -102,6 +105,10 @@ func Run(args []string, assets Assets) error {
 		}
 	case "test-send":
 		return c.testSend(args)
+	case "db":
+		if len(args) > 0 && args[0] == "copy-to" {
+			return c.copyTo(args[1:])
+		}
 	}
 	fmt.Print(usage)
 	return fmt.Errorf("perintah tidak dikenal: %s %s", cmd, strings.Join(args, " "))
@@ -130,7 +137,11 @@ func (c *ctx) serve() error {
 	go a.Inbound().RunKVDrain(sigCtx, 5*time.Minute)
 	go a.RunScheduled(sigCtx, 30*time.Second)
 
-	log.Printf("Wmail berjalan di http://%s (db: %s)", server.Addr, c.cfg.DBPath)
+	where := c.cfg.DBPath
+	if c.cfg.DBURL != "" {
+		where = "PostgreSQL" // the URL may hold a password
+	}
+	log.Printf("Wmail berjalan di http://%s (db: %s)", server.Addr, where)
 	if c.db.CountAdmins() == 0 {
 		log.Printf("PERINGATAN: belum ada admin. Jalankan: wmail user add <nama> --admin")
 	}
@@ -342,6 +353,35 @@ func (c *ctx) config(args []string) error {
 		return nil
 	}
 	return errors.New("pakai: wmail config set <key> [nilai] | get <key> | show")
+}
+
+// copyTo moves everything from the SQLite file into an empty PostgreSQL database.
+// The URL is asked when not given, so its password stays out of ps and shell history.
+func (c *ctx) copyTo(args []string) error {
+	var url string
+	if len(args) > 0 {
+		url = args[0]
+	} else {
+		url = promptSecret("URL PostgreSQL tujuan (postgres://user:password@host:5432/nama_db)")
+	}
+	if c.cfg.DBURL != "" {
+		return errors.New("DATABASE_URL sudah terisi: sumber salinan harus database SQLite")
+	}
+	if !db.IsPostgres(url) {
+		return errors.New("tujuan harus URL postgres://user:password@host:5432/nama_db")
+	}
+	dst, err := db.InitDB(url)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+	fmt.Println("Menyalin " + c.cfg.DBPath + " ke PostgreSQL ...")
+	if err := c.db.CopyTo(dst); err != nil {
+		return err
+	}
+	fmt.Println("✓ Selesai. Tambahkan DATABASE_URL=<url tadi> ke file env (server: /etc/wmail/wmail.env),")
+	fmt.Println("  lalu jalankan lagi wmail. File SQLite tidak diubah dan bisa dipakai lagi dengan menghapus DATABASE_URL.")
+	return nil
 }
 
 func (c *ctx) testSend(args []string) error {

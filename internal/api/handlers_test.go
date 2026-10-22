@@ -18,6 +18,7 @@ import (
 	"wmail/internal/api"
 	"wmail/internal/config"
 	"wmail/internal/db"
+	"wmail/internal/dbtest"
 	"wmail/internal/models"
 	"wmail/internal/service"
 )
@@ -35,12 +36,8 @@ type env struct {
 func setup(t *testing.T) *env {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := &config.Config{DBPath: filepath.Join(dir, "test.db"), DataDir: filepath.Join(dir, "att")}
-	d, err := db.InitDB(cfg.DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { d.Close() })
+	cfg := &config.Config{DataDir: filepath.Join(dir, "att")}
+	d := dbtest.Open(t)
 
 	if _, err := d.CreateUser("root", pw, true); err != nil {
 		t.Fatal(err)

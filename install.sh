@@ -78,7 +78,7 @@ ok "perintah: sudo wmail help"
 cat > /etc/systemd/system/wmail.service <<EOF
 [Unit]
 Description=Wmail webmail
-After=network-online.target
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
@@ -103,7 +103,7 @@ ok "wmail.service"
 
 bold "3. Setup (domain, admin, Cloudflare, Resend, SES)"
 FIRST=1
-[[ -f $DATA/mail.db ]] && FIRST=0
+[[ -f $DATA/mail.db ]] || grep -q '^DATABASE_URL=.' "$ENVFILE" && FIRST=0
 if [[ $FIRST == 1 ]] || confirm "Jalankan wizard setup lagi?" "y/N"; then
   /usr/local/bin/wmail setup
 fi
@@ -166,7 +166,68 @@ EOF
   ok "cloudflared berjalan (wmail-cloudflared.service, user tanpa hak root)"
 fi
 
-bold "5. Menjalankan Wmail"
+# local_postgres installs PostgreSQL on this machine if needed, with a wmail role and database,
+# and sets PGURL. The wmail system user logs in by peer auth over the local socket: no password to keep.
+local_postgres() {
+  pgsu() { (cd / && runuser -u postgres -- "$@"); }
+  if ! id postgres >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null; then
+      apt-get update -qq && apt-get install -y -qq postgresql || return 1
+    elif command -v dnf >/dev/null; then
+      dnf module enable -y -q postgresql:15 >/dev/null 2>&1 || true # RHEL 8 defaults to PostgreSQL 10
+      dnf install -y -q postgresql-server || return 1
+    else
+      echo "  ! Pemasangan otomatis hanya lewat apt (Debian/Ubuntu) atau dnf (Fedora/RHEL). Pasang PostgreSQL sendiri, lalu pilih URL."
+      return 1
+    fi
+  fi
+  # Fedora/RHEL install the server without a cluster; Debian creates one itself.
+  if command -v postgresql-setup >/dev/null && [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
+    postgresql-setup --initdb >/dev/null || return 1
+  fi
+  systemctl enable --now postgresql >/dev/null 2>&1 || true
+  for _ in {1..15}; do pgsu pg_isready -q && break; sleep 1; done
+  pgsu psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'wmail'" | grep -q 1 || pgsu createuser wmail || return 1
+  pgsu psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'wmail'" | grep -q 1 || pgsu createdb -O wmail wmail || return 1
+  local ver sock port
+  ver=$(pgsu psql -tAc 'SHOW server_version_num')
+  (( ${ver:-0} >= 120000 )) || { echo "  ! PostgreSQL $(pgsu psql -tAc 'SHOW server_version') terlalu lama, Wmail butuh versi 12 ke atas."; return 1; }
+  sock=$(pgsu psql -tAc 'SHOW unix_socket_directories' | cut -d, -f1 | xargs) port=$(pgsu psql -tAc 'SHOW port')
+  [[ $sock == /tmp* ]] && { echo "  ! Socket PostgreSQL di $sock tidak terlihat oleh service (PrivateTmp)."; return 1; }
+  PGURL="postgres:///wmail?host=$sock&port=$port"
+  ok "PostgreSQL $(pgsu psql -tAc 'SHOW server_version' | cut -d' ' -f1) lokal, database wmail"
+}
+
+bold "5. Database"
+if grep -q '^DATABASE_URL=.' "$ENVFILE"; then
+  ok "PostgreSQL (DATABASE_URL di $ENVFILE)"
+elif [[ -f $DATA/mail.db ]] && confirm "Pindahkan data dari SQLite ke PostgreSQL?" "y/N"; then
+  PGURL=
+  if confirm "Pasang PostgreSQL di server ini? (n = pakai server PostgreSQL yang sudah ada)" "Y/n"; then
+    local_postgres || PGURL=
+  else
+    read -r -s -p "  URL PostgreSQL kosong (postgres://user:password@host:5432/nama_db): " PGURL; echo
+  fi
+  if [[ -z $PGURL ]]; then
+    echo "  ! PostgreSQL belum siap. Tetap memakai SQLite."
+  elif [[ $PGURL == *"'"* ]]; then
+    echo "  ! URL tidak boleh berisi tanda kutip ('), tulis sebagai %27. Tetap memakai SQLite."
+  else
+    # Stopped so the SQLite file cannot change mid-copy; inbound mail waits in Cloudflare KV meanwhile.
+    systemctl stop wmail 2>/dev/null || true
+    # printf is a builtin, so the URL and its password never appear on a command line.
+    if printf '%s\n' "$PGURL" | /usr/local/bin/wmail db copy-to >/dev/null; then
+      printf "DATABASE_URL='%s'\n" "$PGURL" >> "$ENVFILE"
+      ok "data tersalin, Wmail memakai PostgreSQL ($DATA/mail.db disimpan apa adanya)"
+    else
+      echo "  ! Gagal menyalin (lihat pesan di atas). Tetap memakai SQLite."
+    fi
+  fi
+else
+  ok "SQLite ($DATA/mail.db)"
+fi
+
+bold "6. Menjalankan Wmail"
 systemctl enable wmail >/dev/null 2>&1
 systemctl restart wmail
 sleep 1

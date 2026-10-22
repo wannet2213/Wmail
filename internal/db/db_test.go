@@ -11,15 +11,12 @@ import (
 	_ "modernc.org/sqlite"
 
 	"wmail/internal/db"
+	"wmail/internal/dbtest"
 	"wmail/internal/models"
 )
 
 func TestUsersSessionsMailboxes(t *testing.T) {
-	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
+	d := dbtest.Open(t)
 
 	if _, err := d.CreateUser("ana", "short", true); !errors.Is(err, db.ErrInvalidInput) {
 		t.Fatalf("short password accepted: %v", err)
@@ -157,11 +154,7 @@ func TestLegacyTimestampsRepaired(t *testing.T) {
 }
 
 func TestConversations(t *testing.T) {
-	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
+	d := dbtest.Open(t)
 	mb, _ := d.CreateMailbox("info@contoh.com", "")
 	at := func(h int) time.Time { return time.Date(2026, 10, 20, h, 0, 0, 0, time.UTC) }
 	save := func(m models.Email) int64 {
@@ -237,11 +230,7 @@ func TestConversations(t *testing.T) {
 }
 
 func TestBareMailboxNameGetsDomain(t *testing.T) {
-	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
+	d := dbtest.Open(t)
 	_ = d.SetSetting("domain", "Contoh.com")
 	id, err := d.CreateMailbox(" Sales ", "")
 	if err != nil {
@@ -299,11 +288,7 @@ func TestMailboxSignatureMovesToUsers(t *testing.T) {
 }
 
 func TestSearchUsesFullTextIndex(t *testing.T) {
-	d, err := db.InitDB(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
+	d := dbtest.Open(t)
 	mb, _ := d.CreateMailbox("info@contoh.com", "")
 	contract := models.Email{MailboxID: mb, MessageID: "<k@x>", FromEmail: "budi@luar.test", Subject: "Kontrak baru",
 		BodyText: "Mohon tanda tangan dokumennya", Folder: "inbox"}
@@ -331,10 +316,79 @@ func TestSearchUsesFullTextIndex(t *testing.T) {
 			t.Fatalf("search %q = %v, want [%d]", q, got, want)
 		}
 	}
+	for _, q := range []string{"'", `\`, "o'neil", `x:* | !y & (z)`, "..."} { // typed text is never syntax
+		search(q)
+	}
 	deleted := true
 	_ = d.UpdateEmailStatus(contract.ID, models.UpdateStatusRequest{IsDeleted: &deleted})
 	_ = d.DeleteEmail(contract.ID)
 	if got := search("kontrak"); len(got) != 0 {
 		t.Fatalf("a deleted email is still found: %v", got)
+	}
+}
+
+func TestCopyToPostgres(t *testing.T) {
+	dsn := dbtest.DSN(t)
+	if !db.IsPostgres(dsn) {
+		t.Skip("WMAIL_TEST_POSTGRES not set")
+	}
+	src, err := db.InitDB(filepath.Join(t.TempDir(), "src.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	uid, _ := src.CreateUser("Ana", "password-1", true)
+	mb, _ := src.CreateMailbox("info@contoh.com", "Info")
+	_ = src.SetGrant(uid, mb, true)
+	_ = src.SetSetting("domain", "contoh.com")
+	token, _ := src.CreateSession(uid, time.Hour)
+	at := time.Date(2026, 10, 20, 11, 42, 19, 0, time.UTC)
+	e := models.Email{MailboxID: mb, MessageID: "<k@x>", FromEmail: "budi@luar.test", Subject: "Kontrak baru",
+		BodyText: "tanda tangan", Folder: "inbox", IsUnread: true, CreatedAt: at,
+		Attachments: []models.Attachment{{ID: "att-1", Filename: "a.pdf", ContentType: "application/pdf", SizeBytes: 3, FilePath: "/x/att-1"}}}
+	if err := src.SaveEmail(&e); err != nil {
+		t.Fatal(err)
+	}
+
+	dst, err := db.InitDB(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	if err := src.CopyTo(dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.CopyTo(dst); err == nil {
+		t.Fatal("copied twice into the same database")
+	}
+
+	if u, err := dst.Authenticate("ana", "password-1"); err != nil || u.ID != uid || !u.IsAdmin {
+		t.Fatalf("login after copy: %+v %v", u, err)
+	}
+	if u, err := dst.UserBySession(token); err != nil || u.ID != uid {
+		t.Fatalf("session after copy: %v", err)
+	}
+	if m, send := dst.Access(&models.User{ID: uid}, mb); m == nil || !send {
+		t.Fatal("grant lost in copy")
+	}
+	if dst.GetSetting("domain") != "contoh.com" {
+		t.Fatal("setting lost in copy")
+	}
+	list, _, err := dst.ListEmails(mb, "inbox", "kontr", 50, 0)
+	if err != nil || len(list) != 1 || !list[0].CreatedAt.Equal(at) || !list[0].IsUnread {
+		t.Fatalf("copied email not listed or searchable: %+v %v", list, err)
+	}
+	if got, _ := dst.GetEmail(e.ID); len(got.Attachments) != 1 || got.Attachments[0].FilePath != "/x/att-1" {
+		t.Fatalf("attachment rows: %+v", got.Attachments)
+	}
+	// New rows must be numbered after the copied ones.
+	if _, err := dst.CreateUser("budi", "password-1", false); err != nil {
+		t.Fatalf("new user after copy: %v", err)
+	}
+	if _, err := dst.CreateMailbox("sales@contoh.com", ""); err != nil {
+		t.Fatalf("new mailbox after copy: %v", err)
+	}
+	if err := dst.SaveEmail(&models.Email{MailboxID: mb, MessageID: "<n@x>", FromEmail: "a@b", Subject: "s", Folder: "inbox"}); err != nil {
+		t.Fatalf("new email after copy: %v", err)
 	}
 }

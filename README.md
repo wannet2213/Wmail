@@ -78,6 +78,25 @@ wmail test-send <dari> <ke>              wmail setup
 
 Contoh: `sudo wmail config set resend_api_key` meminta key secara tersembunyi.
 
+## Database
+
+Default-nya SQLite (`DB_PATH`), tanpa server tambahan. PostgreSQL 12+ dipakai bila
+`DATABASE_URL=postgres://user:password@host:5432/nama_db` diisi di `/etc/wmail/wmail.env`.
+
+Pindah dari SQLite ke PostgreSQL: jalankan `sudo ./install.sh` dan jawab `y` di langkah
+*Database*. Installer bisa memasang PostgreSQL di server ini (apt untuk Debian/Ubuntu, dnf untuk
+Fedora/RHEL; database `wmail`, login lewat socket lokal tanpa password) atau memakai server PostgreSQL yang sudah ada (URL).
+Lalu installer menghentikan Wmail, menyalin semua data ke database yang masih kosong,
+menulis `DATABASE_URL` ke file env, dan menyalakan Wmail lagi. Email yang
+masuk selama berhenti ditahan di KV Cloudflare. Bila penyalinan gagal, Wmail tetap memakai
+SQLite. Langkah manualnya: hentikan Wmail, `sudo wmail db copy-to` (URL ditanya tersembunyi),
+tambahkan `DATABASE_URL='postgres://…'` ke `/etc/wmail/wmail.env`, nyalakan lagi.
+
+Lampiran tetap di `DATA_DIR`. File SQLite tidak diubah: hapus `DATABASE_URL` untuk kembali
+ke SQLite (data yang masuk selama memakai PostgreSQL tidak ikut). Bedanya di PostgreSQL:
+pencarian tidak mengabaikan aksen ("kafe" tidak menemukan "café") dan hanya 200.000
+karakter pertama tiap email yang terindeks.
+
 ## Development
 
 ```bash
