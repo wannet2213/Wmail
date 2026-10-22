@@ -172,7 +172,8 @@ local_postgres() {
   pgsu() { (cd / && runuser -u postgres -- "$@"); }
   if ! id postgres >/dev/null 2>&1; then
     if command -v apt-get >/dev/null; then
-      apt-get update -qq && apt-get install -y -qq postgresql || return 1
+      # noninteractive: on images without tzdata, postgresql pulls it in and it would stop to ask a time zone.
+      apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql || return 1
     elif command -v dnf >/dev/null; then
       dnf module enable -y -q postgresql:15 >/dev/null 2>&1 || true # RHEL 8 defaults to PostgreSQL 10
       dnf install -y -q postgresql-server || return 1
