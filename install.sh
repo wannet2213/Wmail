@@ -55,6 +55,8 @@ if [[ ! -f $ENVFILE ]]; then
   PORT=$(ask "Port lokal web server" 8080)
   cat > "$ENVFILE" <<EOF
 PORT=$PORT
+# 127.0.0.1: hanya lewat Cloudflare Tunnel. 0.0.0.0: juga bisa dibuka dari LAN (http://ip-lan:PORT, tanpa HTTPS).
+BIND_ADDR=127.0.0.1
 DB_PATH=$DATA/mail.db
 DATA_DIR=$DATA/attachments
 EOF
@@ -173,7 +175,7 @@ systemctl is-active --quiet wmail && ok "wmail aktif" || die "wmail gagal start:
 . "$ENVFILE"
 URL=$(/usr/local/bin/wmail config get public_url)
 bold "Selesai"
-echo "  Web lokal : http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT"
+echo "  Web lokal : http://${BIND_ADDR:-127.0.0.1}:$PORT  (BIND_ADDR di $ENVFILE)"
 [[ -n $URL ]] && echo "  Web publik: $URL"
 echo "  Log       : journalctl -u wmail -f"
 echo "  Perintah  : sudo wmail help   (user, mailbox, grant, config, test-send)"

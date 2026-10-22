@@ -10,17 +10,19 @@ import (
 // Cloudflare ids, limits) lives in the DB settings table so the CLI can change
 // it while the server runs.
 type Config struct {
-	Port    string
-	DBPath  string
-	DataDir string
+	Port     string
+	BindAddr string // 127.0.0.1 = only cloudflared reaches the app; 0.0.0.0 opens it to the LAN
+	DBPath   string
+	DataDir  string
 }
 
 func LoadConfig() *Config {
 	loadDotEnv(".env")
 	return &Config{
-		Port:    getEnv("PORT", "8080"),
-		DBPath:  getEnv("DB_PATH", "./data/mail.db"),
-		DataDir: getEnv("DATA_DIR", "./data/attachments"),
+		Port:     getEnv("PORT", "8080"),
+		BindAddr: getEnv("BIND_ADDR", "127.0.0.1"),
+		DBPath:   getEnv("DB_PATH", "./data/mail.db"),
+		DataDir:  getEnv("DATA_DIR", "./data/attachments"),
 	}
 }
 

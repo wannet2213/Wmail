@@ -13,7 +13,7 @@ Pengirim → Cloudflare Email Routing (catch-all) → Worker wmail-inbound
              ├─ POST raw MIME → https://mail.domain/api/inbound/raw (tunnel) → Wmail
              ├─ 404 (alamat tidak terdaftar) → email ditolak/bounce
              └─ server tidak terjangkau → disimpan di KV → diambil Wmail nanti
-Browser → https://mail.domain (tunnel) atau http://ip-lan:8080 → Wmail (Go + SQLite)
+Browser → https://mail.domain (tunnel) → Wmail (Go + SQLite, listen 127.0.0.1; BIND_ADDR=0.0.0.0 untuk akses LAN)
 Wmail → Resend API  ─(gagal / kuota habis)→  Amazon SES SMTP :587
 ```
 

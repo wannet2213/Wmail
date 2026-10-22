@@ -296,6 +296,70 @@ func TestAdminSettingsMasked(t *testing.T) {
 	}
 }
 
+func TestLimitersSurviveSuccessfulLogins(t *testing.T) {
+	e := setup(t)
+	login := func(user, pass string) int {
+		return e.do(t, nil, "POST", "/api/auth/login", map[string]string{"username": user, "password": pass}).Code
+	}
+	for i := 0; i < 4; i++ {
+		login("root", "salah")
+	}
+	if c := login("bob", pw); c != 200 { // attacker's own account
+		t.Fatalf("own login: want 200, got %d", c)
+	}
+	if c := login("root", "salah"); c != 401 {
+		t.Fatalf("5th failure: want 401, got %d", c)
+	}
+	if c := login("root", pw); c != 429 {
+		t.Fatalf("a success on another account reset the budget: want 429, got %d", c)
+	}
+
+	e2 := setup(t)
+	bob := e2.login(t, "bob")
+	for i := 0; i < 5; i++ {
+		e2.do(t, bob, "POST", "/api/me/password", map[string]string{"current": "salah", "new": "baru-12345"})
+	}
+	if rec := e2.do(t, bob, "POST", "/api/me/password", map[string]string{"current": pw, "new": "baru-12345"}); rec.Code != 429 {
+		t.Fatalf("password change after 5 wrong guesses: want 429, got %d", rec.Code)
+	}
+}
+
+func TestLoginLimitCoversWholeIPv6Block(t *testing.T) {
+	e := setup(t)
+	login := func(addr string) int {
+		req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"username":"root","password":"salah"}`))
+		req.RemoteAddr = "127.0.0.1:5000" // cloudflared
+		req.Header.Set("CF-Connecting-IP", addr)
+		rec := httptest.NewRecorder()
+		e.router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for i := 1; i <= 5; i++ {
+		login(fmt.Sprintf("2001:db8:1:2::%x", i))
+	}
+	if c := login("2001:db8:1:2:ffff::9"); c != 429 {
+		t.Fatalf("new address in the same /64: want 429, got %d", c)
+	}
+	if c := login("2001:db8:1:3::1"); c != 401 {
+		t.Fatalf("another /64 has its own budget: want 401, got %d", c)
+	}
+}
+
+func TestPlainHTTPViaCloudflareRedirects(t *testing.T) {
+	e := setup(t)
+	req := httptest.NewRequest("GET", "/settings.html?x=1", nil)
+	req.Host = "mail.x.test"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != "https://mail.x.test/settings.html?x=1" {
+		t.Fatalf("want 308 to https, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := e.do(t, nil, "GET", "/", nil); rec.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatal("HSTS header missing")
+	}
+}
+
 func TestLoginLimiterHoldsUnderConcurrency(t *testing.T) {
 	e := setup(t)
 	var wg sync.WaitGroup

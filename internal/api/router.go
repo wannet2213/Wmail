@@ -105,7 +105,14 @@ const csp = "default-src 'self'; img-src * data: blob:; style-src 'self' 'unsafe
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Cloudflare forwards plain-http visits with X-Forwarded-Proto: http. Bounce them to https
+		// before a password or session cookie travels in clear text.
+		if r.Header.Get("X-Forwarded-Proto") == "http" {
+			http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
+			return
+		}
 		h := w.Header()
+		h.Set("Strict-Transport-Security", "max-age=31536000") // browsers ignore it on plain-http LAN access
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", csp)

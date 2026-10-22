@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -68,6 +69,16 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// ipBucket groups IPv6 by /64: one host usually owns the whole block, so counting
+// single addresses would hand it 2^64 fresh login budgets.
+func ipBucket(ip string) string {
+	p := net.ParseIP(ip)
+	if p == nil || p.To4() != nil {
+		return ip
+	}
+	return p.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 func (a *API) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -90,15 +101,15 @@ func (a *API) startSession(w http.ResponseWriter, r *http.Request, u *models.Use
 }
 
 func (a *API) Login(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	// Reserve the attempt before hashing so concurrent requests share the same budget.
-	if !a.limiter.attempt(ip) {
-		http.Error(w, "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.", http.StatusTooManyRequests)
-		return
-	}
 	var req struct{ Username, Password string }
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	ip := ipBucket(clientIP(r))
+	// Reserve the attempt before hashing so concurrent requests share the same budget.
+	if !a.limiter.attempt(ip) {
+		http.Error(w, "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.", http.StatusTooManyRequests)
 		return
 	}
 	u, err := a.db.Authenticate(req.Username, req.Password)
@@ -106,7 +117,7 @@ func (a *API) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Username atau password salah.", http.StatusUnauthorized)
 		return
 	}
-	a.limiter.reset(ip)
+	a.limiter.refund(ip)
 	if err := a.startSession(w, r, u); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -137,10 +148,17 @@ func (a *API) ChangePassword(w http.ResponseWriter, r *http.Request, u *models.U
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
+	// Keyed by account, not IP: whoever holds the session gets 5 guesses per window, from anywhere.
+	key := "pw:" + strconv.FormatInt(u.ID, 10)
+	if !a.limiter.attempt(key) {
+		http.Error(w, "Terlalu banyak percobaan. Coba lagi dalam 15 menit.", http.StatusTooManyRequests)
+		return
+	}
 	if _, err := a.db.Authenticate(u.Username, req.Current); err != nil {
 		http.Error(w, "Password lama salah.", http.StatusForbidden)
 		return
 	}
+	a.limiter.refund(key)
 	if err := a.db.SetPassword(u.ID, req.New); err != nil {
 		writeDBError(w, err)
 		return
@@ -179,7 +197,7 @@ func writeDBError(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
-// ponytail: in-memory per-IP counter, unbounded map; fine for a home server, add eviction if it ever faces real traffic.
+// ponytail: in-memory counter per IP (login) or account (password change), unbounded map; fine for a home server, add eviction if it ever faces real traffic.
 type loginLimiter struct {
 	mu    sync.Mutex
 	fails map[string]*failEntry
@@ -192,14 +210,14 @@ type failEntry struct {
 
 func newLoginLimiter() *loginLimiter { return &loginLimiter{fails: map[string]*failEntry{}} }
 
-// attempt checks and counts one login attempt atomically; a successful login calls reset.
-func (l *loginLimiter) attempt(ip string) bool {
+// attempt checks and counts one attempt atomically; a correct password calls refund.
+func (l *loginLimiter) attempt(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	e := l.fails[ip]
+	e := l.fails[key]
 	if e == nil || time.Since(e.first) >= failWindow {
 		e = &failEntry{first: time.Now()}
-		l.fails[ip] = e
+		l.fails[key] = e
 	}
 	if e.n >= maxFails {
 		return false
@@ -208,8 +226,12 @@ func (l *loginLimiter) attempt(ip string) bool {
 	return true
 }
 
-func (l *loginLimiter) reset(ip string) {
+// refund returns only this request's slot. It never clears the count: a correct password
+// for one account must not erase failures made against other accounts from the same key.
+func (l *loginLimiter) refund(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.fails, ip)
+	if e := l.fails[key]; e != nil && e.n > 0 {
+		e.n--
+	}
 }

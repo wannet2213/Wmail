@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -117,7 +118,7 @@ type ctx struct {
 func (c *ctx) serve() error {
 	a := api.NewAPI(c.cfg, c.db)
 	server := &http.Server{
-		Addr:         ":" + c.cfg.Port,
+		Addr:         net.JoinHostPort(c.cfg.BindAddr, c.cfg.Port),
 		Handler:      api.SetupRouter(a, c.assets.Web),
 		ReadTimeout:  120 * time.Second,
 		WriteTimeout: 120 * time.Second,
@@ -129,7 +130,7 @@ func (c *ctx) serve() error {
 	go a.Inbound().RunKVDrain(sigCtx, 5*time.Minute)
 	go a.RunScheduled(sigCtx, 30*time.Second)
 
-	log.Printf("Wmail berjalan di http://localhost:%s (db: %s)", c.cfg.Port, c.cfg.DBPath)
+	log.Printf("Wmail berjalan di http://%s (db: %s)", server.Addr, c.cfg.DBPath)
 	if c.db.CountAdmins() == 0 {
 		log.Printf("PERINGATAN: belum ada admin. Jalankan: wmail user add <nama> --admin")
 	}
@@ -449,7 +450,7 @@ func (c *ctx) setup() error {
 	}
 
 	fmt.Println("\n=== Selesai ===")
-	fmt.Printf("Web: %s (atau http://<ip-server>:%s di jaringan lokal)\n", c.db.GetSetting("public_url"), c.cfg.Port)
+	fmt.Printf("Web: %s (lokal: http://%s, ubah lewat BIND_ADDR)\n", c.db.GetSetting("public_url"), net.JoinHostPort(c.cfg.BindAddr, c.cfg.Port))
 	fmt.Println("Cek konfigurasi: wmail config show · Uji kirim: wmail test-send <dari> <ke>")
 	return nil
 }
