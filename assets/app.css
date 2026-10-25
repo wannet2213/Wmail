@@ -98,6 +98,29 @@
 /* A select with a transparent background passes its light text to the open list, which
    the browser still draws white in the dark theme; give the options the theme's colors. */
 option { background: var(--surface); color: var(--text); }
+/* Where the browser can style the open list (Chromium's customizable select), it looks
+   like the app's other menus. Elsewhere selects keep the native list. */
+@supports (appearance: base-select) {
+  select, ::picker(select) { appearance: base-select; }
+  select { align-items: center; }
+  select::picker-icon {
+    content: "expand_more" / "";
+    font: 400 18px/1 "MS Outlined"; font-feature-settings: "liga";
+    color: var(--icon); transition: rotate .15s;
+  }
+  select:open::picker-icon { rotate: 180deg; }
+  ::picker(select) {
+    margin-block: 4px; padding: 8px 0;
+    border: 0; border-radius: 12px;
+    background: var(--surface); box-shadow: var(--shadow-2);
+  }
+  option { padding: 10px 16px; font: 400 14px var(--font-ui); cursor: pointer; }
+  option::checkmark { display: none; }
+  option:hover { background: var(--row-hover); }
+  option:checked { background: var(--selected); }
+  option:checked:hover { background: var(--selected-hover); }
+  option:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+}
 html, body { height: 100%; }
 body {
   margin: 0;
