@@ -471,16 +471,17 @@ img { display: block; }
 .compose-head-btns { display: flex; }
 .compose-head-btns .iconbtn { width: 32px; height: 32px; }
 .compose-head-btns .iconbtn .ms { font-size: 18px; }
+.compose-to input, .compose-cc input, .compose-subject {
+  border: 0; outline: none; background: none;
+  width: 100%;
+  font-size: 14px;
+}
+/* After the input reset: the subject row is an input itself and keeps its bottom line. */
 .compose-to, .compose-cc, .compose-subject {
   height: 40px; flex: none;
   border-bottom: 1px solid var(--line);
   display: flex; align-items: center;
   padding: 0 12px;
-}
-.compose-to input, .compose-cc input, .compose-subject {
-  border: 0; outline: none; background: none;
-  width: 100%;
-  font-size: 14px;
 }
 .compose-to .iconbtn, .compose-cc .iconbtn { width: 32px; height: 32px; }
 .compose-attachments {
