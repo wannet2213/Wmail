@@ -95,6 +95,9 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+/* A select with a transparent background passes its light text to the open list, which
+   the browser still draws white in the dark theme; give the options the theme's colors. */
+option { background: var(--surface); color: var(--text); }
 html, body { height: 100%; }
 body {
   margin: 0;
