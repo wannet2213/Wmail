@@ -1,6 +1,6 @@
 # Wmail
 
-Webmail untuk domain sendiri yang berjalan di home server tanpa IP publik.
+Webmail untuk satu atau beberapa domain sendiri yang berjalan di home server tanpa IP publik.
 
 - **Terima:** Cloudflare Email Routing → Worker → Cloudflare Tunnel → server rumah.
   Kalau server sedang mati, Worker menitipkan email di Workers KV, lalu Wmail mengambilnya saat hidup lagi (dicek tiap 5 menit).
@@ -30,7 +30,7 @@ Installer akan:
 1. Build binary (Go dipasang otomatis dari go.dev bila belum ada).
 2. Membuat user sistem `wmail`, data di `/var/lib/wmail`, dan service `wmail.service`.
 3. Menjalankan wizard `wmail setup`:
-   - domain dan hostname web (default `mail.<domain>`)
+   - domain (beberapa sekaligus dipisah koma; yang pertama domain utama) dan hostname web (default `mail.<domain utama>`)
    - akun admin dan mailbox pertama
    - Cloudflare: buat KV, Tunnel + DNS, upload Worker, aktifkan Email Routing, catch-all → Worker
    - Resend: daftarkan domain dan pasang record DKIM/SPF/DMARC otomatis di Cloudflare
@@ -41,7 +41,8 @@ Jalankan ulang `sudo ./install.sh` untuk upgrade.
 
 ### Cloudflare API token
 
-Buat di <https://dash.cloudflare.com/profile/api-tokens> → *Custom token*, batasi ke zone domain Anda:
+Buat di <https://dash.cloudflare.com/profile/api-tokens> → *Custom token*, batasi ke zone semua domain email Anda
+(atau *All zones from an account* agar domain yang ditambah nanti langsung tercakup):
 
 | Scope   | Permission          | Level |
 |---------|---------------------|-------|
@@ -58,7 +59,7 @@ Token disimpan di database server karena dipakai untuk menarik antrean KV.
 ### Resend dan SES
 
 - **Resend:** setup otomatis butuh API key *Full access*. Key *Sending access* tetap bisa dipakai kirim, tapi domain harus diverifikasi manual di dashboard Resend.
-- **SES:** buat IAM user dengan izin `ses:SendRawEmail`, verifikasi domain di konsol SES (Identities), lalu minta keluar dari sandbox.
+- **SES:** buat IAM user dengan izin `ses:SendRawEmail`, verifikasi setiap domain di konsol SES (Identities), lalu minta keluar dari sandbox.
   Password SMTP diturunkan otomatis dari secret key, jadi cukup isi region, access key, dan secret.
 - **Mode `auto` (default):** Resend dipakai sampai 95 email/hari atau 2800/bulan (batas aman paket gratis), lalu beralih ke SES.
   Ubah batasnya dengan `resend_daily_limit` / `resend_monthly_limit` (`0` = tanpa batas).
@@ -75,9 +76,25 @@ wmail config set <key> [nilai]           wmail config show | get <key>
 wmail cloudflare setup                   wmail resend setup
 wmail test-send <dari> <ke>              wmail setup
 wmail backup key | backup > file.age     wmail restore < file.age
+wmail domain add <domain> [domain...]    wmail domain list
 ```
 
 Contoh: `sudo wmail config set resend_api_key` meminta key secara tersembunyi.
+
+### Beberapa domain
+
+`sudo wmail domain add toko.id contoh.org` menambah beberapa domain sekaligus. Untuk tiap domain,
+Email Routing dan catch-all ke Worker dipasang di zone-nya, lalu domain itu didaftarkan di Resend
+beserta DNS-nya (bila `resend_api_key` sudah diisi). Semua zone harus ada di akun Cloudflare yang sama
+dengan Worker. Domain yang gagal dilewati dan dilaporkan; setelah diperbaiki, ulangi perintah yang sama.
+
+Bila token lama dibatasi ke zone tertentu, domain baru gagal dengan pesan *tidak terlihat oleh token ini*.
+Edit token itu di dashboard Cloudflare dan tambahkan zone baru di *Zone Resources*. Nilai token tidak
+berubah, jadi cukup ulangi `wmail domain add`. Bila memilih membuat token baru, simpan dulu dengan
+`sudo wmail config set cf_api_token` (permission-nya harus lengkap seperti tabel di atas, karena token
+yang sama dipakai untuk menarik antrean KV). Nama mailbox tanpa `@` memakai domain utama (yang pertama);
+di halaman Pengaturan domainnya bisa dipilih. Daftar lengkapnya bisa diubah dengan
+`wmail config set domain "contoh.com, toko.id"`.
 
 ## Database
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/mail"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,7 +232,10 @@ func TestConversations(t *testing.T) {
 
 func TestBareMailboxNameGetsDomain(t *testing.T) {
 	d := dbtest.Open(t)
-	_ = d.SetSetting("domain", "Contoh.com")
+	_ = d.SetSetting("domain", "Contoh.com, toko.id\nlain.org contoh.com")
+	if got := strings.Join(d.Domains(), " "); got != "contoh.com toko.id lain.org" {
+		t.Fatalf("domains: %q", got)
+	}
 	id, err := d.CreateMailbox(" Sales ", "")
 	if err != nil {
 		t.Fatal(err)

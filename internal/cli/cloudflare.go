@@ -34,7 +34,8 @@ dengan permission berikut:
   Zone    | DNS                   | Edit
   Zone    | Email Routing Rules   | Edit
   Zone    | Zone Settings         | Edit
-Zone Resources: Include -> Specific zone -> domain Anda.`
+Zone Resources: Include -> Specific zone -> setiap domain email Anda
+(atau Include -> All zones from an account, agar domain baru langsung tercakup).`
 
 func randomString(n int, enc func([]byte) string) string {
 	b := make([]byte, n)
@@ -42,13 +43,42 @@ func randomString(n int, enc func([]byte) string) string {
 	return enc(b)
 }
 
+func step(msg string)    { fmt.Printf("  • %s... ", msg) }
+func done(detail string) { fmt.Println("✓ " + detail) }
+
+type zoneInfo struct {
+	ID, Status string
+	Account    struct{ ID string }
+}
+
+func findZone(api *cf.Client, domain string) (zoneInfo, error) {
+	var zones []zoneInfo
+	if err := api.Do("GET", "/zones?name="+url.QueryEscape(domain), nil, &zones); err != nil {
+		return zoneInfo{}, err
+	}
+	if len(zones) == 0 {
+		return zoneInfo{}, fmt.Errorf("zone %s tidak terlihat oleh token ini. Pastikan domainnya sudah ditambahkan di Cloudflare, "+
+			"lalu edit token di https://dash.cloudflare.com/profile/api-tokens dan tambahkan zone ini di Zone Resources "+
+			"(nilai token tidak berubah, jadi tidak perlu disimpan ulang)", domain)
+	}
+	return zones[0], nil
+}
+
 func (c *ctx) cloudflareSetup() error {
-	domain := c.db.GetSetting("domain")
+	domains := c.db.Domains()
 	publicURL := c.db.GetSetting("public_url")
-	if domain == "" || publicURL == "" {
+	if len(domains) == 0 || publicURL == "" {
 		return errors.New("set dulu domain dan public_url (wmail setup atau wmail config set)")
 	}
 	host := strings.TrimPrefix(publicURL, "https://")
+	// The tunnel hostname goes in the zone of the domain it belongs to, normally the primary.
+	hostDomain := domains[0]
+	for _, d := range domains {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			hostDomain = d
+			break
+		}
+	}
 
 	token := c.db.GetSetting("cf_api_token")
 	if token == "" || !confirm("Pakai Cloudflare API token yang tersimpan "+maskTail(token)+"?", true) {
@@ -59,25 +89,13 @@ func (c *ctx) cloudflareSetup() error {
 	}
 	api := cf.New(token)
 
-	step := func(msg string) { fmt.Printf("  • %s... ", msg) }
-	done := func(detail string) { fmt.Println("✓ " + detail) }
-
-	step("Mencari zone " + domain)
-	var zones []struct {
-		ID, Status string
-		Account    struct{ ID string }
-	}
-	if err := api.Do("GET", "/zones?name="+url.QueryEscape(domain), nil, &zones); err != nil {
+	step("Mencari zone " + hostDomain)
+	z, err := findZone(api, hostDomain)
+	if err != nil {
 		return err
 	}
-	if len(zones) == 0 {
-		return fmt.Errorf("domain %s tidak ditemukan di akun Cloudflare ini (atau token tidak punya akses Zone)", domain)
-	}
-	zone, account := zones[0].ID, zones[0].Account.ID
-	done("zone " + zones[0].Status)
-	if zones[0].Status != "active" {
-		fmt.Println("    ! Zone belum aktif: pastikan nameserver domain sudah diarahkan ke Cloudflare.")
-	}
+	zone, account := z.ID, z.Account.ID
+	done("zone " + z.Status)
 	_ = c.db.SetSetting("cf_api_token", token)
 	_ = c.db.SetSetting("cf_zone_id", zone)
 	_ = c.db.SetSetting("cf_account_id", account)
@@ -124,13 +142,52 @@ func (c *ctx) cloudflareSetup() error {
 	}
 	done("terpasang")
 
-	step("Mengaktifkan Email Routing")
-	enableErr := api.Do("POST", "/zones/"+zone+"/email/routing/dns", nil, nil)
+	if _, err := routeDomains(api, account, domains); err != nil {
+		return err
+	}
+
+	fmt.Println("\n  Cloudflare siap. Alamat yang tidak dibuat sebagai mailbox akan ditolak (bounce).")
+	fmt.Println("  Jalankan installer lagi agar cloudflared dipasang dengan token di file root-only")
+	fmt.Println("  (bukan di command line):  sudo ./install.sh")
+	return nil
+}
+
+// routeDomains turns on Email Routing for each domain and sends its catch-all to the Worker.
+// A failing domain is reported and skipped so it does not hold up the others.
+func routeDomains(api *cf.Client, account string, domains []string) (routed []string, err error) {
+	var errs []error
+	for _, d := range domains {
+		if err := routeDomain(api, account, d); err != nil {
+			fmt.Println("✗", err)
+			errs = append(errs, fmt.Errorf("%s: %w", d, err))
+		} else {
+			routed = append(routed, d)
+		}
+	}
+	return routed, errors.Join(errs...)
+}
+
+func routeDomain(api *cf.Client, account, domain string) error {
+	step("Zone " + domain)
+	z, err := findZone(api, domain)
+	if err != nil {
+		return err
+	}
+	if z.Account.ID != account {
+		return errors.New("zone ini ada di akun Cloudflare lain, sedangkan Worker hanya bisa dipakai zone di akun yang sama")
+	}
+	done(z.Status)
+	if z.Status != "active" {
+		fmt.Println("    ! Zone belum aktif: pastikan nameserver " + domain + " sudah diarahkan ke Cloudflare.")
+	}
+
+	step("Email Routing " + domain)
+	enableErr := api.Do("POST", "/zones/"+z.ID+"/email/routing/dns", nil, nil)
 	var routing struct {
 		Enabled bool
 		Status  string
 	}
-	_ = api.Do("GET", "/zones/"+zone+"/email/routing", nil, &routing)
+	_ = api.Do("GET", "/zones/"+z.ID+"/email/routing", nil, &routing)
 	if !routing.Enabled {
 		fmt.Println("✗")
 		if enableErr != nil {
@@ -149,14 +206,10 @@ func (c *ctx) cloudflareSetup() error {
 		"matchers": []map[string]string{{"type": "all"}},
 		"actions":  []map[string]any{{"type": "worker", "value": []string{workerName}}},
 	}
-	if err := api.Do("PUT", "/zones/"+zone+"/email/routing/rules/catch_all", rule, nil); err != nil {
+	if err := api.Do("PUT", "/zones/"+z.ID+"/email/routing/rules/catch_all", rule, nil); err != nil {
 		return err
 	}
 	done("aktif")
-
-	fmt.Println("\n  Cloudflare siap. Alamat yang tidak dibuat sebagai mailbox akan ditolak (bounce).")
-	fmt.Println("  Jalankan installer lagi agar cloudflared dipasang dengan token di file root-only")
-	fmt.Println("  (bukan di command line):  sudo ./install.sh")
 	return nil
 }
 
@@ -269,12 +322,15 @@ type resendRecord struct {
 	Priority                          *int
 }
 
-func (c *ctx) resendSetup() error {
-	key, domain, zone, token := c.db.GetSetting("resend_api_key"), c.db.GetSetting("domain"), c.db.GetSetting("cf_zone_id"), c.db.GetSetting("cf_api_token")
-	if key == "" || domain == "" {
+func (c *ctx) resendSetup() error { return c.resendDomains(c.db.Domains()) }
+
+// resendDomains registers each domain at Resend and puts its DKIM/SPF/DMARC records in its zone.
+func (c *ctx) resendDomains(domains []string) error {
+	key, token := c.db.GetSetting("resend_api_key"), c.db.GetSetting("cf_api_token")
+	if key == "" || len(domains) == 0 {
 		return errors.New("set dulu resend_api_key dan domain")
 	}
-	if zone == "" || token == "" {
+	if token == "" {
 		return errors.New("jalankan `wmail cloudflare setup` dulu (dibutuhkan untuk memasang DNS)")
 	}
 	hc := &http.Client{Timeout: 30 * time.Second}
@@ -289,12 +345,29 @@ func (c *ctx) resendSetup() error {
 		}
 		return err
 	}
-	id := ""
-	for _, d := range list.Data {
-		if d.Name == domain {
-			id = d.ID
+	var errs []error
+	for _, domain := range domains {
+		id := ""
+		for _, d := range list.Data {
+			if d.Name == domain {
+				id = d.ID
+			}
+		}
+		if err := c.resendDomain(hc, api, key, id, domain); err != nil {
+			fmt.Printf("  ✗ %s: %v\n", domain, err)
+			errs = append(errs, fmt.Errorf("%s: %w", domain, err))
 		}
 	}
+	fmt.Println("  Verifikasi biasanya selesai dalam beberapa menit; cek di https://resend.com/domains atau jalankan ulang `wmail resend setup`.")
+	return errors.Join(errs...)
+}
+
+func (c *ctx) resendDomain(hc *http.Client, api *cf.Client, key, id, domain string) error {
+	z, err := findZone(api, domain)
+	if err != nil {
+		return err
+	}
+	zone := z.ID
 	if id == "" {
 		var created struct{ ID string }
 		if err := service.ResendDo(hc, key, "POST", "/domains", map[string]string{"name": domain}, &created); err != nil {
@@ -341,6 +414,6 @@ func (c *ctx) resendSetup() error {
 	if err := service.ResendDo(hc, key, "POST", "/domains/"+id+"/verify", nil, nil); err != nil {
 		return err
 	}
-	fmt.Printf("  • Verifikasi dimulai (status saat ini: %s). Biasanya selesai dalam beberapa menit;\n    cek di https://resend.com/domains atau jalankan ulang `wmail resend setup`.\n", dom.Status)
+	fmt.Printf("  • Verifikasi %s dimulai (status saat ini: %s)\n", domain, dom.Status)
 	return nil
 }

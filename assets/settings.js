@@ -36,8 +36,8 @@ async function run(fn, okMsg) {
 }
 
 let me = null;
-let domain = ""; // the mail domain; bare names typed in address fields get "@" + domain
-const fullAddress = (s) => (s.includes("@") || !domain ? s : `${s}@${domain}`);
+let domains = []; // mail domains, primary first; bare names typed in address fields get "@" + one of them
+const fullAddress = (s, dom = domains[0]) => (s.includes("@") || !dom ? s : `${s}@${dom}`);
 let data = { users: [], mailboxes: [], grants: [] };
 
 /* ---------- my account ---------- */
@@ -75,7 +75,7 @@ function filterList(input, items) {
 }
 
 // accessHtml lists only the mailboxes u holds, and new ones are picked by typing the
-// address, so it stays short however many mailboxes the domain has.
+// address, so it stays short however many mailboxes there are.
 function accessHtml(u, held) {
   if (!data.mailboxes.length) return `<p class="muted">Belum ada mailbox.</p>`;
   return `${held.length ? `<div class="table-wrap"><table class="data-table"><tbody>${held.map((g) => `<tr>
@@ -216,16 +216,17 @@ $("#mbList").addEventListener("click", (e) => {
   }
 });
 
-// The "@domain" suffix shows while a bare name is typed; a full address hides it.
+// The "@domain" picker shows while a bare name is typed; a full address hides it.
 function syncDomainSuffix() {
-  $("#newDomain").hidden = !domain || $("#newAddress").value.includes("@");
+  $("#newDomain").hidden = !domains.length || $("#newAddress").value.includes("@");
 }
 $("#newAddress").addEventListener("input", syncDomainSuffix);
 
 $("#mbForm").addEventListener("submit", (e) => {
   e.preventDefault();
   run(async () => {
-    await api("/api/admin/mailboxes", "POST", { address: $("#newAddress").value, displayName: $("#newDisplay").value });
+    const address = fullAddress($("#newAddress").value.trim(), $("#newDomain").value);
+    await api("/api/admin/mailboxes", "POST", { address, displayName: $("#newDisplay").value });
     e.target.reset();
     syncDomainSuffix();
     await loadAdmin();
@@ -238,9 +239,9 @@ const PROVIDER_KEYS = ["active_provider", "resend_api_key", "resend_daily_limit"
 
 async function loadSettings() {
   const s = await api("/api/admin/settings");
-  domain = lc(s.domain);
-  $("#newDomain").textContent = `@${domain}`;
-  $("#newAddress").placeholder = domain ? "nama" : "nama@domain-anda.com";
+  domains = lc(s.domain).split(/[\s,]+/).filter(Boolean);
+  $("#newDomain").innerHTML = domains.map((d) => `<option value="${esc(d)}">@${esc(d)}</option>`).join("");
+  $("#newAddress").placeholder = domains.length ? "nama" : "nama@domain-anda.com";
   syncDomainSuffix();
   for (const k of PROVIDER_KEYS) $("#" + k).value = s[k] || (k === "active_provider" ? "auto" : "");
   const info = [

@@ -72,7 +72,7 @@
       <div class="settings-field"><label for="newAddress">Alamat</label>
         <div class="settings-input-group">
           <input class="settings-input" id="newAddress" placeholder="nama@domain-anda.com" autocomplete="off" required>
-          <span class="input-suffix" id="newDomain" hidden></span>
+          <select class="settings-input input-suffix" id="newDomain" aria-label="Domain" hidden></select>
         </div></div>
       <div class="settings-field"><label for="newDisplay">Nama pengirim</label>
         <input class="settings-input" id="newDisplay" placeholder="Nama yang tampil di penerima"></div>
@@ -119,7 +119,7 @@
 
   <section id="secCloudflare" hidden>
     <h2>Cloudflare</h2>
-    <p class="muted">Diatur dari server dengan <code>wmail cloudflare setup</code>.</p>
+    <p class="muted">Diatur dari server dengan <code>wmail cloudflare setup</code>. Tambah domain: <code>wmail domain add contoh.com toko.id</code>.</p>
     <dl class="kv" id="cfInfo"></dl>
   </section>
 </main>

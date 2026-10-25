@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"wmail/internal/models"
 
@@ -1260,12 +1261,26 @@ func NormalizeAddress(addr string) string {
 	return strings.ToLower(strings.TrimSpace(addr))
 }
 
-// FullAddress normalizes addr and gives a bare name ("sales") the configured domain,
+// ParseDomains splits the "domain" setting ("contoh.com, toko.id") into lowercase,
+// unique names. The first one is the primary domain.
+func ParseDomains(s string) []string {
+	var out []string
+	for _, f := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+		if !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func (d *DB) Domains() []string { return ParseDomains(d.GetSetting("domain")) }
+
+// FullAddress normalizes addr and gives a bare name ("sales") the primary domain,
 // so nobody has to type "@domain" when adding or granting a mailbox.
 func (d *DB) FullAddress(addr string) string {
 	addr = NormalizeAddress(addr)
-	if dom := NormalizeAddress(d.GetSetting("domain")); addr != "" && dom != "" && !strings.Contains(addr, "@") {
-		addr += "@" + dom
+	if doms := d.Domains(); addr != "" && len(doms) > 0 && !strings.Contains(addr, "@") {
+		addr += "@" + doms[0]
 	}
 	return addr
 }
@@ -1537,7 +1552,7 @@ type SettingKey struct {
 }
 
 var SettingKeys = []SettingKey{
-	{Key: "domain", Desc: "Domain email, mis. contoh.com"},
+	{Key: "domain", Desc: "Domain email, pisahkan dengan koma; yang pertama domain utama. Mis. contoh.com, toko.id"},
 	{Key: "public_url", Desc: "URL publik web (tunnel), mis. https://mail.contoh.com"},
 	{Key: "active_provider", Desc: "auto | resend | ses", Web: true},
 	{Key: "resend_api_key", Desc: "API key Resend (re_...)", Secret: true, Web: true},

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -21,6 +22,7 @@ import (
 
 	"wmail/internal/api"
 	"wmail/internal/backup"
+	"wmail/internal/cf"
 	"wmail/internal/config"
 	"wmail/internal/db"
 	"wmail/internal/service"
@@ -40,6 +42,11 @@ Pemakaian: wmail <perintah> [argumen]
 Server
   serve                                 jalankan web server (default)
   setup                                 wizard interaktif (domain, admin, Cloudflare, Resend, SES)
+
+Domain
+  domain list                           daftar domain email (yang pertama = utama)
+  domain add <domain> [domain...]       tambah satu atau beberapa domain sekaligus,
+                                        lalu pasang Email Routing (+ Resend bila ada key)
 
 Akun
   user add <nama> [--admin]             buat akun (password ditanya)
@@ -94,6 +101,8 @@ func Run(args []string, assets Assets) error {
 		return c.serve()
 	case "setup":
 		return c.setup()
+	case "domain":
+		return c.domain(args)
 	case "user":
 		return c.user(args)
 	case "mailbox":
@@ -243,6 +252,56 @@ func (c *ctx) userList() error {
 	return tw.Flush()
 }
 
+/* ---------- domains ---------- */
+
+// domain adds mail domains and sets up Email Routing, and Resend + DNS when a key is set.
+// Domains already in the list are set up again, so a failed run can simply be repeated.
+func (c *ctx) domain(args []string) error {
+	if len(args) == 1 && args[0] == "list" {
+		for i, d := range c.db.Domains() {
+			fmt.Println(d + map[bool]string{true: "  (utama)"}[i == 0])
+		}
+		return nil
+	}
+	if len(args) < 2 || args[0] != "add" {
+		return errors.New("pakai: wmail domain add <domain> [domain...] | list")
+	}
+	want := db.ParseDomains(strings.Join(args[1:], " "))
+	if len(want) == 0 {
+		return errors.New("pakai: wmail domain add <domain> [domain...]")
+	}
+	if err := api.ValidateSetting("domain", strings.Join(want, " ")); err != nil {
+		return err
+	}
+	all := c.db.Domains()
+	for _, d := range want {
+		if !slices.Contains(all, d) {
+			all = append(all, d)
+		}
+	}
+	if err := c.db.SetSetting("domain", strings.Join(all, ", ")); err != nil {
+		return err
+	}
+	fmt.Println("✓ Domain: " + strings.Join(all, ", "))
+
+	token, account := c.db.GetSetting("cf_api_token"), c.db.GetSetting("cf_account_id")
+	if token == "" || account == "" {
+		fmt.Println("  Cloudflare belum disiapkan; lanjutkan dengan: sudo wmail cloudflare setup")
+		return nil
+	}
+	routed, err := routeDomains(cf.New(token), account, want)
+	if len(routed) > 0 && c.db.GetSetting("resend_api_key") != "" {
+		err = errors.Join(err, c.resendDomains(routed))
+	}
+	if c.db.GetSetting("aws_access_key_id") != "" {
+		fmt.Println("  Ingat: verifikasi juga " + strings.Join(want, ", ") + " di konsol SES (Identities).")
+	}
+	if err != nil {
+		fmt.Println("\n  Setelah diperbaiki, ulangi: sudo wmail domain add " + strings.Join(want, " "))
+	}
+	return err
+}
+
 /* ---------- mailbox & grants ---------- */
 
 func (c *ctx) mailbox(args []string) error {
@@ -268,8 +327,8 @@ func (c *ctx) mailbox(args []string) error {
 		}
 		addr := c.db.FullAddress(args[1])
 		fmt.Printf("✓ Mailbox %s dibuat\n", addr)
-		if d := c.db.GetSetting("domain"); d != "" && !strings.HasSuffix(addr, "@"+d) {
-			fmt.Printf("  Catatan: domain alamat ini bukan %s; pastikan domainnya juga diarahkan ke Worker.\n", d)
+		if _, dom, _ := strings.Cut(addr, "@"); !slices.Contains(c.db.Domains(), dom) {
+			fmt.Printf("  Catatan: %s belum terdaftar sebagai domain; tambahkan dengan: wmail domain add %s\n", dom, dom)
 		}
 		return nil
 	case args[0] == "del":
@@ -497,11 +556,16 @@ func (c *ctx) setup() error {
 	fmt.Println("\n=== Wmail setup ===  (Enter = pakai nilai di [kurung]; setiap langkah bisa diulang)")
 
 	fmt.Println("\n[1/6] Domain")
-	domain := strings.ToLower(prompt("Domain email (mis. contoh.com)", c.db.GetSetting("domain")))
-	if domain == "" {
+	in := prompt("Domain email; beberapa dipisah koma, yang pertama domain utama (mis. contoh.com, toko.id)", strings.Join(c.db.Domains(), ", "))
+	domains := db.ParseDomains(in)
+	if len(domains) == 0 {
 		return errors.New("domain wajib diisi")
 	}
-	_ = c.db.SetSetting("domain", domain)
+	if err := api.ValidateSetting("domain", in); err != nil {
+		return err
+	}
+	_ = c.db.SetSetting("domain", strings.Join(domains, ", "))
+	domain := domains[0]
 	host := strings.TrimPrefix(c.db.GetSetting("public_url"), "https://")
 	if host == "" {
 		host = "mail." + domain
@@ -547,7 +611,7 @@ func (c *ctx) setup() error {
 		_ = c.db.SetSetting("resend_api_key", key)
 	}
 	if c.db.GetSetting("resend_api_key") != "" && c.db.GetSetting("cf_zone_id") != "" &&
-		confirm("Daftarkan "+domain+" di Resend dan pasang DNS (DKIM/SPF) otomatis?", true) {
+		confirm("Daftarkan "+strings.Join(domains, ", ")+" di Resend dan pasang DNS (DKIM/SPF) otomatis?", true) {
 		if err := c.resendSetup(); err != nil {
 			fmt.Printf("✗ Resend setup gagal: %v\n  Jalankan ulang nanti: wmail resend setup\n", err)
 		}
@@ -570,7 +634,7 @@ func (c *ctx) setup() error {
 		_ = c.db.SetSetting("aws_region", region)
 		_ = c.db.SetSetting("aws_access_key_id", keyID)
 		_ = c.db.SetSetting("aws_secret_access_key", secret)
-		fmt.Println("  Ingat: verifikasi domain " + domain + " di konsol SES (Identities) dan keluar dari sandbox SES.")
+		fmt.Println("  Ingat: verifikasi domain " + strings.Join(domains, ", ") + " di konsol SES (Identities) dan keluar dari sandbox SES.")
 	}
 
 	fmt.Println("\n=== Selesai ===")

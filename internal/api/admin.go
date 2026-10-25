@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -223,12 +224,20 @@ func (a *API) AdminSaveSettings(w http.ResponseWriter, r *http.Request, u *model
 	ok(w)
 }
 
+var domainRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
 // ValidateSetting rejects values the mailer would misread; shared with the CLI.
 func ValidateSetting(key, v string) error {
 	switch key {
 	case "active_provider":
 		if v != "" && v != "auto" && v != "resend" && v != "ses" {
 			return errors.New("active_provider harus auto, resend, atau ses")
+		}
+	case "domain":
+		for _, d := range db.ParseDomains(v) {
+			if !domainRe.MatchString(d) {
+				return errors.New("domain tidak valid: " + d)
+			}
 		}
 	case "resend_daily_limit", "resend_monthly_limit":
 		if n, err := strconv.Atoi(v); v != "" && (err != nil || n < 0) {

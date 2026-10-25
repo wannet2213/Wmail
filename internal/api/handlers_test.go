@@ -533,3 +533,19 @@ func TestSignatureIsPerUser(t *testing.T) {
 		t.Fatalf("another user's signature leaked: %q", got)
 	}
 }
+
+func TestValidateDomainSetting(t *testing.T) {
+	for v, valid := range map[string]bool{
+		"":                          true,
+		"contoh.com, Toko.ID":       true,
+		"xn--caf-dma.id sub.a-b.co": true,
+		"contoh.com, admin@toko.id": false,
+		"localhost":                 false,
+		"-bad.com":                  false,
+		"a.com/x":                   false,
+	} {
+		if err := api.ValidateSetting("domain", v); (err == nil) != valid {
+			t.Errorf("%q: %v", v, err)
+		}
+	}
+}
