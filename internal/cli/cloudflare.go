@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,14 +72,6 @@ func (c *ctx) cloudflareSetup() error {
 		return errors.New("set dulu domain dan public_url (wmail setup atau wmail config set)")
 	}
 	host := strings.TrimPrefix(publicURL, "https://")
-	// The tunnel hostname goes in the zone of the domain it belongs to, normally the primary.
-	hostDomain := domains[0]
-	for _, d := range domains {
-		if host == d || strings.HasSuffix(host, "."+d) {
-			hostDomain = d
-			break
-		}
-	}
 
 	token := c.db.GetSetting("cf_api_token")
 	if token == "" || !confirm("Pakai Cloudflare API token yang tersimpan "+maskTail(token)+"?", true) {
@@ -89,8 +82,14 @@ func (c *ctx) cloudflareSetup() error {
 	}
 	api := cf.New(token)
 
-	step("Mencari zone " + hostDomain)
-	z, err := findZone(api, hostDomain)
+	// The tunnel hostname goes in the zone it belongs to (contoh.com for mail.contoh.com),
+	// which need not be a mail domain: it may have been removed with `domain del`.
+	step("Mencari zone " + host)
+	z, err := findZone(api, host)
+	for name := host; err != nil && strings.Count(name, ".") > 1; {
+		_, name, _ = strings.Cut(name, ".")
+		z, err = findZone(api, name)
+	}
 	if err != nil {
 		return err
 	}
@@ -142,7 +141,7 @@ func (c *ctx) cloudflareSetup() error {
 	}
 	done("terpasang")
 
-	if _, err := routeDomains(api, account, domains); err != nil {
+	if _, err := eachDomain(domains, func(d string) error { return routeDomain(api, account, d) }); err != nil {
 		return err
 	}
 
@@ -152,21 +151,22 @@ func (c *ctx) cloudflareSetup() error {
 	return nil
 }
 
-// routeDomains turns on Email Routing for each domain and sends its catch-all to the Worker.
-// A failing domain is reported and skipped so it does not hold up the others.
-func routeDomains(api *cf.Client, account string, domains []string) (routed []string, err error) {
+// eachDomain runs fn for every domain. A failing domain is reported and skipped so it does
+// not hold up the others; ok lists the ones that went through.
+func eachDomain(domains []string, fn func(string) error) (ok []string, err error) {
 	var errs []error
 	for _, d := range domains {
-		if err := routeDomain(api, account, d); err != nil {
+		if err := fn(d); err != nil {
 			fmt.Println("✗", err)
 			errs = append(errs, fmt.Errorf("%s: %w", d, err))
 		} else {
-			routed = append(routed, d)
+			ok = append(ok, d)
 		}
 	}
-	return routed, errors.Join(errs...)
+	return ok, errors.Join(errs...)
 }
 
+// routeDomain turns on Email Routing for the domain and sends its catch-all to the Worker.
 func routeDomain(api *cf.Client, account, domain string) error {
 	step("Zone " + domain)
 	z, err := findZone(api, domain)
@@ -210,6 +210,39 @@ func routeDomain(api *cf.Client, account, domain string) error {
 		return err
 	}
 	done("aktif")
+	return nil
+}
+
+// unrouteDomain turns off the zone's catch-all while it still goes to the Worker, so mail to
+// the domain is bounced. A catch-all someone pointed elsewhere is left alone.
+func unrouteDomain(api *cf.Client, domain string) error {
+	step("Catch-all *@" + domain)
+	z, err := findZone(api, domain)
+	if err != nil {
+		return err
+	}
+	path := "/zones/" + z.ID + "/email/routing/rules/catch_all"
+	var rule struct {
+		Name     string           `json:"name"`
+		Enabled  bool             `json:"enabled"`
+		Matchers []map[string]any `json:"matchers"`
+		Actions  []struct {
+			Type  string   `json:"type"`
+			Value []string `json:"value,omitempty"`
+		} `json:"actions"`
+	}
+	if err := api.Do("GET", path, nil, &rule); err != nil {
+		return err
+	}
+	if !rule.Enabled || len(rule.Actions) != 1 || rule.Actions[0].Type != "worker" || !slices.Contains(rule.Actions[0].Value, workerName) {
+		done("tidak mengarah ke Wmail, dibiarkan")
+		return nil
+	}
+	rule.Enabled = false
+	if err := api.Do("PUT", path, rule, nil); err != nil {
+		return err
+	}
+	done("dimatikan")
 	return nil
 }
 

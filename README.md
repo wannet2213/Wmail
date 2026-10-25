@@ -76,7 +76,8 @@ wmail config set <key> [nilai]           wmail config show | get <key>
 wmail cloudflare setup                   wmail resend setup
 wmail test-send <dari> <ke>              wmail setup
 wmail backup key | backup > file.age     wmail restore < file.age
-wmail domain add <domain> [domain...]    wmail domain list
+wmail domain add <domain> [domain...]    wmail domain del <domain> [domain...]
+wmail domain list
 ```
 
 Contoh: `sudo wmail config set resend_api_key` meminta key secara tersembunyi.
@@ -92,7 +93,12 @@ Bila token lama dibatasi ke zone tertentu, domain baru gagal dengan pesan *tidak
 Edit token itu di dashboard Cloudflare dan tambahkan zone baru di *Zone Resources*. Nilai token tidak
 berubah, jadi cukup ulangi `wmail domain add`. Bila memilih membuat token baru, simpan dulu dengan
 `sudo wmail config set cf_api_token` (permission-nya harus lengkap seperti tabel di atas, karena token
-yang sama dipakai untuk menarik antrean KV). Nama mailbox tanpa `@` memakai domain utama (yang pertama);
+yang sama dipakai untuk menarik antrean KV). `sudo wmail domain del toko.id` menghentikan penerimaan email untuk domain itu: domain keluar dari
+daftar dan catch-all-nya di Cloudflare dimatikan (hanya bila masih mengarah ke Worker Wmail), sehingga
+email ke domain itu ditolak ke pengirim. Mailbox di domain itu dan email lamanya tetap ada; hapus
+terpisah dengan `wmail mailbox del`. Domain di Resend dan record DNS tidak diubah.
+
+Nama mailbox tanpa `@` memakai domain utama (yang pertama);
 di halaman Pengaturan domainnya bisa dipilih. Daftar lengkapnya bisa diubah dengan
 `wmail config set domain "contoh.com, toko.id"`.
 

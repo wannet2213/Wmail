@@ -47,6 +47,8 @@ Domain
   domain list                           daftar domain email (yang pertama = utama)
   domain add <domain> [domain...]       tambah satu atau beberapa domain sekaligus,
                                         lalu pasang Email Routing (+ Resend bila ada key)
+  domain del <domain> [domain...]       berhenti menerima email untuk domain itu
+                                        (mailbox dan email lamanya tetap ada)
 
 Akun
   user add <nama> [--admin]             buat akun (password ditanya)
@@ -263,15 +265,15 @@ func (c *ctx) domain(args []string) error {
 		}
 		return nil
 	}
-	if len(args) < 2 || args[0] != "add" {
-		return errors.New("pakai: wmail domain add <domain> [domain...] | list")
-	}
 	want := db.ParseDomains(strings.Join(args[1:], " "))
-	if len(want) == 0 {
-		return errors.New("pakai: wmail domain add <domain> [domain...]")
+	if len(want) == 0 || (args[0] != "add" && args[0] != "del") {
+		return errors.New("pakai: wmail domain add|del <domain> [domain...] | list")
 	}
 	if err := api.ValidateSetting("domain", strings.Join(want, " ")); err != nil {
 		return err
+	}
+	if args[0] == "del" {
+		return c.domainDel(want)
 	}
 	all := c.db.Domains()
 	for _, d := range want {
@@ -289,7 +291,8 @@ func (c *ctx) domain(args []string) error {
 		fmt.Println("  Cloudflare belum disiapkan; lanjutkan dengan: sudo wmail cloudflare setup")
 		return nil
 	}
-	routed, err := routeDomains(cf.New(token), account, want)
+	cfc := cf.New(token)
+	routed, err := eachDomain(want, func(d string) error { return routeDomain(cfc, account, d) })
 	if len(routed) > 0 && c.db.GetSetting("resend_api_key") != "" {
 		err = errors.Join(err, c.resendDomains(routed))
 	}
@@ -300,6 +303,47 @@ func (c *ctx) domain(args []string) error {
 		fmt.Println("\n  Setelah diperbaiki, ulangi: sudo wmail domain add " + strings.Join(want, " "))
 	}
 	return err
+}
+
+// domainDel stops domains from receiving: they leave the list and their catch-all no longer
+// goes to the Worker. Mailboxes and their mail, Resend and DNS stay as they are. Domains no
+// longer in the list are still unrouted, so a failed run can simply be repeated.
+func (c *ctx) domainDel(del []string) error {
+	mbs, err := c.db.ListMailboxes()
+	if err != nil {
+		return err
+	}
+	var kept []string
+	for _, m := range mbs {
+		if _, dom, _ := strings.Cut(m.Address, "@"); slices.Contains(del, dom) {
+			kept = append(kept, m.Address)
+		}
+	}
+	fmt.Println("Email ke " + strings.Join(del, ", ") + " tidak akan diterima lagi (ditolak ke pengirim).")
+	if len(kept) > 0 {
+		fmt.Println("Mailbox ini tetap ada dan email lamanya masih bisa dibuka: " + strings.Join(kept, ", "))
+		fmt.Println("(hapus terpisah dengan: wmail mailbox del <alamat>)")
+	}
+	if !confirm("Hapus domain?", false) {
+		return nil
+	}
+	rest := slices.DeleteFunc(c.db.Domains(), func(d string) bool { return slices.Contains(del, d) })
+	if err := c.db.SetSetting("domain", strings.Join(rest, ", ")); err != nil {
+		return err
+	}
+	fmt.Println("✓ Domain: " + orDefault(strings.Join(rest, ", "), "(kosong)"))
+
+	token := c.db.GetSetting("cf_api_token")
+	if token == "" {
+		return nil
+	}
+	cfc := cf.New(token)
+	if _, err := eachDomain(del, func(d string) error { return unrouteDomain(cfc, d) }); err != nil {
+		fmt.Println("\n  Setelah diperbaiki, ulangi: sudo wmail domain del " + strings.Join(del, " "))
+		return err
+	}
+	fmt.Println("  Domain di Resend dan record DNS tidak diubah; hapus manual bila tidak dipakai lagi.")
+	return nil
 }
 
 /* ---------- mailbox & grants ---------- */
