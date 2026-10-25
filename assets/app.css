@@ -98,8 +98,8 @@
 /* A select with a transparent background passes its light text to the open list, which
    the browser still draws white in the dark theme; give the options the theme's colors. */
 option { background: var(--surface); color: var(--text); }
-/* Where the browser can style the open list (Chromium's customizable select), it looks
-   like the app's other menus. Elsewhere selects keep the native list. */
+/* The open list of a select looks like the app's other menus: styled natively where the
+   browser can (Chromium's customizable select), else as the .select-menu from select.js. */
 @supports (appearance: base-select) {
   select, ::picker(select) { appearance: base-select; }
   select { align-items: center; }
@@ -114,13 +114,18 @@ option { background: var(--surface); color: var(--text); }
     border: 0; border-radius: 12px;
     background: var(--surface); box-shadow: var(--shadow-2);
   }
-  option { padding: 10px 16px; font: 400 14px var(--font-ui); cursor: pointer; }
   option::checkmark { display: none; }
-  option:hover { background: var(--row-hover); }
-  option:checked { background: var(--selected); }
-  option:checked:hover { background: var(--selected-hover); }
-  option:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 }
+.select-menu { max-width: calc(100vw - 16px); overflow-y: auto; }
+:is(option, .select-menu [role="option"]) {
+  padding: 10px 16px; font: 400 14px var(--font-ui); color: var(--text); cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+option:hover, .select-menu [role="option"]:focus { background: var(--row-hover); outline: none; }
+option:checked, .select-menu [aria-selected="true"] { background: var(--selected); }
+option:checked:hover, .select-menu [aria-selected="true"]:focus { background: var(--selected-hover); }
+:is(option, .select-menu [role="option"]):focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.select-menu [aria-disabled="true"] { color: var(--text-3); cursor: default; }
 html, body { height: 100%; }
 body {
   margin: 0;
