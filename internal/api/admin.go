@@ -12,8 +12,9 @@ import (
 	"wmail/internal/models"
 )
 
+// decode reads a JSON body of at most 1 MiB, so a huge body cannot exhaust memory.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
 		http.Error(w, "invalid json payload", http.StatusBadRequest)
 		return false
 	}

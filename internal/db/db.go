@@ -860,6 +860,10 @@ const sameThread = "(mailbox_id, thread_id) = (SELECT mailbox_id, thread_id FROM
 // conversation, as in Gmail. Sent and scheduled mail keep their folder and read state:
 // moving a conversation to the inbox must not turn a scheduled message into received mail.
 func (d *DB) UpdateEmailStatus(id int64, req models.UpdateStatusRequest) error {
+	// Only SendEmail, after validating the message, may make sent or scheduled mail.
+	if f := req.Folder; f != nil && *f != "inbox" && *f != "snoozed" && *f != "spam" {
+		return fmt.Errorf("%w: folder tidak valid", ErrInvalidInput)
+	}
 	if req.IsStarred != nil {
 		if _, err := d.conn.Exec("UPDATE emails SET is_starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", boolToInt(*req.IsStarred), id); err != nil {
 			return err

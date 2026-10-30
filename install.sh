@@ -37,8 +37,9 @@ else
   if [[ -z $GO ]]; then
     LATEST=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
     confirm "Go belum terpasang. Unduh $LATEST resmi dari go.dev ke /usr/local/go?" || die "Pasang Go >= $GO_MIN lalu ulangi."
-    curl -fsSL "https://go.dev/dl/$LATEST.linux-$ARCH.tar.gz" -o /tmp/go.tgz
-    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+    TGZ=$(mktemp)  # not a fixed /tmp name another local user could plant first
+    curl -fsSL "https://go.dev/dl/$LATEST.linux-$ARCH.tar.gz" -o "$TGZ"
+    rm -rf /usr/local/go && tar -C /usr/local -xzf "$TGZ" && rm "$TGZ"
     GO=/usr/local/go/bin/go
   fi
   ok "$($GO version)"

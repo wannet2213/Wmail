@@ -106,20 +106,20 @@ func (s *InboundService) Ingest(raw []byte, envelopeTo string) (*models.Email, e
 	for _, p := range append(env.Attachments, env.Inlines...) {
 		att, err := SaveAttachmentFile(s.dataDir, p.FileName, p.ContentType, p.Content)
 		if err != nil {
-			removeFiles(email.Attachments)
+			RemoveFiles(email.Attachments)
 			return nil, err
 		}
 		email.Attachments = append(email.Attachments, att)
 	}
 
 	if err := s.db.SaveEmail(&email); err != nil {
-		removeFiles(email.Attachments)
+		RemoveFiles(email.Attachments)
 		return nil, err
 	}
 	return &email, nil
 }
 
-func removeFiles(atts []models.Attachment) {
+func RemoveFiles(atts []models.Attachment) {
 	for _, a := range atts {
 		os.Remove(a.FilePath)
 	}
@@ -150,6 +150,7 @@ func SaveAttachmentFile(dir, filename, contentType string, content []byte) (mode
 	id := uuid.NewString()
 	path := filepath.Join(dir, id)
 	if err := os.WriteFile(path, content, 0640); err != nil {
+		os.Remove(path) // a failed write (disk full) can leave a partial file behind
 		return models.Attachment{}, fmt.Errorf("write attachment: %w", err)
 	}
 	return models.Attachment{ID: id, Filename: name, ContentType: contentType, SizeBytes: int64(len(content)), FilePath: path, CreatedAt: time.Now()}, nil

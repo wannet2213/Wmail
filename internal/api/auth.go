@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -102,8 +101,7 @@ func (a *API) startSession(w http.ResponseWriter, r *http.Request, u *models.Use
 
 func (a *API) Login(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Username, Password string }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+	if !decode(w, r, &req) {
 		return
 	}
 	ip := ipBucket(clientIP(r))
@@ -144,8 +142,7 @@ func (a *API) Me(w http.ResponseWriter, r *http.Request, u *models.User) {
 
 func (a *API) ChangePassword(w http.ResponseWriter, r *http.Request, u *models.User) {
 	var req struct{ Current, New string }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+	if !decode(w, r, &req) {
 		return
 	}
 	// Keyed by account, not IP: whoever holds the session gets 5 guesses per window, from anywhere.
@@ -174,8 +171,7 @@ func (a *API) ChangePassword(w http.ResponseWriter, r *http.Request, u *models.U
 // SetSignature saves the signature added below what u writes, from any mailbox.
 func (a *API) SetSignature(w http.ResponseWriter, r *http.Request, u *models.User) {
 	var req struct{ Signature string }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+	if !decode(w, r, &req) {
 		return
 	}
 	if len(req.Signature) > 4000 {

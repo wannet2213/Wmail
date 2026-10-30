@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,11 +27,12 @@ import (
 const pw = "rahasia-123"
 
 type env struct {
-	db     *db.DB
-	api    *api.API
-	router http.Handler
-	mbA    int64 // bob: receive only
-	mbB    int64 // bob: no access
+	db      *db.DB
+	api     *api.API
+	router  http.Handler
+	mbA     int64 // bob: receive only
+	mbB     int64 // bob: no access
+	dataDir string
 }
 
 func setup(t *testing.T) *env {
@@ -55,7 +57,7 @@ func setup(t *testing.T) *env {
 
 	web := fstest.MapFS{"index.html": {Data: []byte("<html>wmail</html>")}}
 	a2 := api.NewAPI(cfg, d)
-	return &env{db: d, api: a2, router: api.SetupRouter(a2, web), mbA: a, mbB: b}
+	return &env{db: d, api: a2, router: api.SetupRouter(a2, web), mbA: a, mbB: b, dataDir: cfg.DataDir}
 }
 
 func (e *env) do(t *testing.T, cookie *http.Cookie, method, path string, body any) *httptest.ResponseRecorder {
@@ -547,5 +549,83 @@ func TestValidateDomainSetting(t *testing.T) {
 		if err := api.ValidateSetting("domain", v); (err == nil) != valid {
 			t.Errorf("%q: %v", v, err)
 		}
+	}
+}
+
+func TestOversizedJSONBodyRefused(t *testing.T) {
+	e := setup(t)
+	big := `{"username":"` + strings.Repeat("a", 2<<20) + `","password":"x"}`
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(big)))
+	if rec.Code != 400 {
+		t.Fatalf("2 MiB login body: want 400, got %d", rec.Code)
+	}
+}
+
+// Inbound mail never passed send validation, so PATCH must not queue it for sending.
+func TestPatchCannotScheduleInboundMail(t *testing.T) {
+	e := setup(t)
+	e.inbound(t, "a@x.test", "s3cret", rawMail)
+	root := e.login(t, "root")
+	list, _, _ := e.db.ListEmails(e.mbA, "inbox", "", 50, 0)
+	for _, f := range []string{"scheduled", "sent"} {
+		if rec := e.do(t, root, "PATCH", "/api/emails/"+itoa(list[0].ID), map[string]string{"folder": f}); rec.Code != 400 {
+			t.Fatalf("folder %q: want 400, got %d", f, rec.Code)
+		}
+	}
+	if ids, _ := e.db.DueScheduled(time.Now()); len(ids) != 0 {
+		t.Fatalf("inbound mail got scheduled: %v", ids)
+	}
+}
+
+func TestScheduledSendGivesUp(t *testing.T) {
+	e := setup(t)
+	calls := 0
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnprocessableEntity)
+	}))
+	defer fake.Close()
+	service.ResendURL = fake.URL
+	e.db.SetSetting("resend_api_key", "re_test")
+	root := e.login(t, "root")
+	e.do(t, root, "POST", "/api/emails/send", map[string]any{
+		"from": e.mbA, "to": "dest@example.com", "sendAt": time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+	list, _, _ := e.db.ListEmails(e.mbA, "scheduled", "", 50, 0)
+	for i := 0; i < 20; i++ {
+		_ = e.db.Reschedule(list[0].ID, time.Now().Add(-time.Second))
+		e.api.SendDue()
+	}
+	if calls != 12 { // maxSendAttempts
+		t.Fatalf("want 12 tries before giving up, got %d", calls)
+	}
+}
+
+// A scheduled message goes out from what was stored, so a failed attachment save must not be ignored.
+func TestScheduledSendFailsWhenAttachmentCannotBeSaved(t *testing.T) {
+	e := setup(t)
+	if err := os.WriteFile(e.dataDir, nil, 0600); err != nil { // a file where the attachments dir should be
+		t.Fatal(err)
+	}
+	root := e.login(t, "root")
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	mw.WriteField("from", itoa(e.mbA))
+	mw.WriteField("to", "dest@example.com")
+	mw.WriteField("sendAt", time.Now().Add(time.Hour).Format(time.RFC3339))
+	fw, _ := mw.CreateFormFile("attachments", "a.txt")
+	fw.Write([]byte("lampiran"))
+	mw.Close()
+	req := httptest.NewRequest("POST", "/api/emails/send", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(root)
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Fatalf("want 500, got %d %s", rec.Code, rec.Body)
+	}
+	if list, _, _ := e.db.ListEmails(e.mbA, "scheduled", "", 50, 0); len(list) != 0 {
+		t.Fatalf("scheduled without its attachment: %+v", list)
 	}
 }

@@ -27,15 +27,21 @@ type API struct {
 	mailer  *service.Mailer
 	inbound *service.InboundService
 	limiter *loginLimiter
+	// sendFails counts failed tries per scheduled message; only the RunScheduled goroutine touches it.
+	sendFails map[int64]int
 }
+
+// maxSendAttempts bounds retries of a scheduled message (2 hours at 10-minute retries).
+const maxSendAttempts = 12
 
 func NewAPI(cfg *config.Config, database *db.DB) *API {
 	return &API{
-		cfg:     cfg,
-		db:      database,
-		mailer:  service.NewMailer(database),
-		inbound: service.NewInboundService(cfg.DataDir, database),
-		limiter: newLoginLimiter(),
+		cfg:       cfg,
+		db:        database,
+		mailer:    service.NewMailer(database),
+		inbound:   service.NewInboundService(cfg.DataDir, database),
+		limiter:   newLoginLimiter(),
+		sendFails: map[int64]int{},
 	}
 }
 
@@ -138,8 +144,7 @@ func (a *API) GetEmail(w http.ResponseWriter, r *http.Request, u *models.User) {
 
 func (a *API) UpdateEmail(w http.ResponseWriter, r *http.Request, u *models.User) {
 	var req models.UpdateStatusRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json payload", http.StatusBadRequest)
+	if !decode(w, r, &req) {
 		return
 	}
 	// Read and star flags are fine for readers; moving or deleting needs a send+receive grant.
@@ -149,7 +154,7 @@ func (a *API) UpdateEmail(w http.ResponseWriter, r *http.Request, u *models.User
 		return
 	}
 	if err := a.db.UpdateEmailStatus(email.ID, req); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeDBError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -291,15 +296,26 @@ func (a *API) SendEmail(w http.ResponseWriter, r *http.Request, u *models.User) 
 		email.Provider, email.MessageID = result.Provider, result.MessageID
 	}
 
-	if err := os.MkdirAll(a.cfg.DataDir, 0750); err == nil {
+	// A scheduled message is sent from what is stored here, so a lost attachment must fail the request.
+	if err = os.MkdirAll(a.cfg.DataDir, 0750); err == nil {
 		for _, at := range attachments {
-			if saved, err := service.SaveAttachmentFile(a.cfg.DataDir, at.Filename, at.ContentType, at.Content); err == nil {
-				email.Attachments = append(email.Attachments, saved)
+			var saved models.Attachment
+			if saved, err = service.SaveAttachmentFile(a.cfg.DataDir, at.Filename, at.ContentType, at.Content); err != nil {
+				break
 			}
+			email.Attachments = append(email.Attachments, saved)
 		}
 	}
-	if err := a.db.SaveEmail(&email); err != nil {
-		http.Error(w, "Email terkirim tetapi gagal disimpan: "+err.Error(), http.StatusInternalServerError)
+	if err == nil {
+		err = a.db.SaveEmail(&email)
+	}
+	if err != nil {
+		service.RemoveFiles(email.Attachments)
+		msg := "Email terkirim tetapi gagal disimpan: "
+		if email.Folder == "scheduled" {
+			msg = "Gagal menjadwalkan email: "
+		}
+		http.Error(w, msg+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "provider": email.Provider, "email": email})
@@ -338,7 +354,7 @@ func (a *API) Unschedule(w http.ResponseWriter, r *http.Request, u *models.User)
 }
 
 // SendDue sends every scheduled message whose time has come. A failed one is retried
-// 10 minutes later and stays in Terjadwal, where its owner can cancel it.
+// 10 minutes later, up to maxSendAttempts tries, and stays in Terjadwal, where its owner can cancel it.
 func (a *API) SendDue() {
 	ids, err := a.db.DueScheduled(time.Now())
 	if err != nil {
@@ -346,6 +362,9 @@ func (a *API) SendDue() {
 		return
 	}
 	for _, id := range ids {
+		if a.sendFails[id] >= maxSendAttempts {
+			continue
+		}
 		e, err := a.db.GetEmail(id)
 		if err != nil {
 			continue
@@ -358,12 +377,19 @@ func (a *API) SendDue() {
 		}
 		result, err := a.mailer.Send(sendOptions(e, atts))
 		if err != nil {
-			// ponytail: retries every 10 minutes for good; add a give-up limit if permanent failures pile up.
-			log.Printf("[JADWAL] email %d gagal dikirim, dicoba lagi 10 menit lagi: %v", id, err)
+			// ponytail: counts live in memory, so a restart allows another maxSendAttempts tries.
+			if a.sendFails[id]++; a.sendFails[id] >= maxSendAttempts {
+				log.Printf("[JADWAL] email %d gagal %d kali, tidak dicoba lagi: %v", id, a.sendFails[id], err)
+				continue
+			}
+			log.Printf("[JADWAL] email %d gagal dikirim (%d/%d), dicoba lagi 10 menit lagi: %v", id, a.sendFails[id], maxSendAttempts, err)
 			_ = a.db.Reschedule(id, time.Now().Add(10*time.Minute))
 			continue
 		}
+		delete(a.sendFails, id)
 		if err := a.db.MarkSent(id, result.Provider, result.MessageID); err != nil {
+			// Still due in the DB; without this it would go out again on every tick.
+			a.sendFails[id] = maxSendAttempts
 			log.Printf("[JADWAL] email %d terkirim tetapi gagal ditandai: %v", id, err)
 		}
 	}
